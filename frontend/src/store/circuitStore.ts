@@ -4,6 +4,7 @@ import type {
   ComponentInstance,
   ComponentKind,
   PinRef,
+  Rotation,
   Wire,
   WireRoute,
 } from "../types/circuit";
@@ -59,7 +60,8 @@ interface CircuitState {
   addComponent: (kind: ComponentKind, x: number, y: number) => void;
   moveComponent: (id: string, x: number, y: number) => void;
   setWireRoute: (id: string, route: WireRoute) => void;
-  rotateComponent: (id: string) => void;
+  /** Turn clockwise by `step` degrees (90 by default, 45 for a diagonal). */
+  rotateComponent: (id: string, step?: 45 | 90) => void;
   mirrorComponent: (id: string) => void;
   updateParam: (id: string, key: string, value: number) => void;
   select: (ref: SelectionRef) => void;
@@ -130,11 +132,11 @@ export const useCircuitStore = create<CircuitState>((set, get) => ({
       wires: s.wires.map((w) => (w.id === id ? { ...w, route } : w)),
     })),
 
-  rotateComponent: (id) =>
+  rotateComponent: (id, step = 90) =>
     set((s) => ({
       components: s.components.map((c) =>
         c.id === id
-          ? { ...c, rotation: (((c.rotation + 90) % 360) as 0 | 90 | 180 | 270) }
+          ? { ...c, rotation: ((c.rotation + step) % 360) as Rotation }
           : c
       ),
     })),

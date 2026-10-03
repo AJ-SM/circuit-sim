@@ -159,6 +159,7 @@ Called by the **⚡ Generate Circuit** button of the drawing modal (`DrawCircuit
 
 - `component_details` is what gives the frontend each part's position and orientation.
 - `value_source`: `"ocr"` (read from the drawing), `"ocr_inferred"` (read, but a trailing digit was reinterpreted as a prefix, e.g. "43" → 4k, so it is a guess) or `"default"`.
+- `poly` (parts detected on a slant only): the oriented outline's four corners, image pixels. `bbox` is its axis-aligned bounds.
 - `polarity` (sources only) says how `+` was decided: `"marks"` (drawn +/− signs), `"plates"` (battery long/short plate) or `"default"` (assumed top/right).
 - `dropped_detections` lists detections discarded because no wire touches them (usually handwritten labels). It's for debugging and the frontend ignores it.
 - Pin names: `A`/`B` (R, L, C), `+`/`-` (sources), `anode`/`cathode` (diode), `GND` (ground).
@@ -222,9 +223,10 @@ Measured on `target/diagram.jpg` (a canvas drawing) and the sample photos in `ci
 
    Real parts scored 77–82%, so no confidence threshold separates them. The likely cause is that labels were never annotated as negatives. The engine drops detections that no wire touches (§4), but a label drawn touching a wire can still get through.
 2. **Values are not read by the model.** A separate OCR step now reads them (§5), with limited accuracy on handwriting.
-3. **Polarity is not detected by the model.** The engine now works it out from the source's own ink (§4, stage 7b). Diode direction is still assumed (anode left/top).
-6. **Battery vs capacitor.** A synthetic battery symbol (long + short plate) was detected as a *Capacitor*. So the battery plate heuristic only helps when the model actually outputs `Battery`. This was only tested on a synthetic drawing, so real battery drawings may do better; unconfirmed.
-4. **Loose boxes.** Boxes often extend past the symbol. This is plausibly caused by the auto-generated centred labels in the v2 data. The engine tolerates it by finding pins from wire contacts, not from box shape.
+3. **Polarity is not detected by the model.** The engine now works it out from the source's own ink (§4, stage 7b) and the diode's triangle (stage 7c).
+6. **Battery vs capacitor.** Battery symbols (long + short plate) are often detected as *Capacitor* (e.g. `newtar.jpeg`). The engine re-labels them from the plates (§4, stage 7a).
+4. **Loose boxes.** Boxes often extend past the symbol. This is plausibly caused by the auto-generated centred labels in the v2 data. The engine finds pins from wire contacts, not from box shape, and trims each box back to its symbol ink (§4, stage 3b) so it doesn't erase wires passing close by.
+7. **Slanted parts.** The model was trained on upright symbols, so a resistor drawn on a diagonal is often missed, mislabelled (e.g. as a capacitor) or only partly boxed. The recognizer also runs the image rotated ±45° (§4, stage 2).
 5. **Busy or lined-paper photos** give many low-confidence or duplicate detections (e.g. `mycircuit2.jpg`). Ruled notebook lines also read as wires.
 
 **Suggested retraining:** annotate value text as a negative / `text` class; add canvas-style drawings (clean strokes on a plain background); replace the auto-centred SolvaDataset boxes with tight ones; optionally annotate `+` markers.
@@ -241,17 +243,20 @@ image ─► decode_image ─► YOLO detect ─► DrawnTopology ─► Netlist
 | Stage | Where | What it does |
 |---|---|---|
 | 1. Decode | `recognizer.decode_image` | base64 → BGR image; alpha flattened onto white |
-| 2. Detect | `recognizer.recognize` | YOLOv12n → boxes with class + confidence |
-| 3. Dedupe | `drawn_topology.dedupe_boxes` | Class-agnostic: if two boxes overlap > 70 % of the smaller, keep the more confident |
-| 4. Ink mask | `drawn_topology.binarize` | Otsu threshold for clean canvas images; Otsu ∧ adaptive for photos |
-| 5. Wire blobs | `DrawnTopology._wire_labels` | Erase all component boxes → remaining ink is wire; small morphological close; connected-component labelling (**one blob = one net**) |
+| 2. Detect | `recognizer.detect_boxes` | YOLOv12n → boxes with class + confidence, on the image and on copies rotated ±45° (`ROTATED_VIEWS`). Detections of one symbol across views are merged: class by confidence vote (rotated views count half, and only R/L/C/diode are taken from them); geometry from the tightest box of that class. A box from a rotated view becomes an oriented rectangle (`poly`), so a diagonal part gets a tight outline instead of a big axis-aligned box |
+| 3. Dedupe | `drawn_topology.dedupe_boxes` | Class-agnostic: if two outlines overlap > 70 % of the smaller — or > 30 % and one is under 0.6× the other's confidence — keep the more confident |
+| 3b. Tighten | `DrawnTopology._tighten` | Pull each upright box's edges in (≤ 30 % per side) while the stroke-wide strip along the edge holds only wire: ink continuing from outside the box that is short, runs to the box side, or is joined outside at both ends. On the edges the leads cross, a run must also follow a lead's straight line (a zigzag stroke drifts > 1 px per step). Frees junctions and wires a loose box would cut |
+| 4. Ink mask | `drawn_topology.binarize` | Otsu threshold for clean canvas images; Otsu ∧ adaptive for photos. Dark canvases (median < 128) are inverted first, otherwise each light stroke's dark halo is taken as ink and every wire splits in two |
+| 5. Wire blobs | `DrawnTopology._wire_labels` | Erase all component outlines (box or `poly`) → remaining ink is wire; small morphological close; connected-component labelling (**one blob = one net**) |
 | 6. Gap bridging | `DrawnTopology._bridge_gaps` | Skeletonise; for each free stroke end *not next to a component*, join it to any other blob within ~3 % of the image diagonal (hand-drawn corners rarely meet exactly) |
-| 7. Terminals | `DrawnTopology._contacts` / `_make_pins` | In a thin ring just outside each box, every cluster of wire ink is a terminal. The two farthest-apart contacts are the pins, snapped to the box edge. This gives the true orientation (e.g. a wide capacitor with top/bottom leads) |
-| 7b. Source polarity | `DrawnTopology._orient_source` | AC Source / Battery / Voltage only. ① **marks**: small blobs inside the box not touching its edge; squarish + sparse = `+`, flat bar = `−`; the `+` end is the one nearer the `+` mark (or farther from the `−`). Contradictory marks → undecided. ② **plates**: ink width across the lead axis at each step; two separate peaks = plates, the end with the ≥1.3× longer plate is `+` (a circle gives one peak → undecided). ③ **default**: `+` top / right. Pins are renamed only; positions and nets don't change |
+| 7. Terminals | `DrawnTopology._contacts` / `_make_pins` | In a thin ring just outside each box, every cluster of wire ink is a terminal. The two farthest-apart contacts are the pins, snapped to the outline. This gives the true orientation (e.g. a wide capacitor with top/bottom leads) |
+| 7b. Source polarity | `DrawnTopology._orient_source` | AC Source / Battery / Voltage only. ① **marks**: small blobs inside the box not touching its edge; squarish + sparse = `+`, flat bar = `−`; the `+` end is the one nearer the `+` mark (or farther from the `−`). Contradictory marks → undecided. ② **plates**: ink width across the lead axis at each step; two separate peaks = plates, the end with the ≥1.3× longer plate is `+` (a circle gives one peak → undecided). ③ **default**: `+` top / right. Pins are renamed only; positions and nets don't change. A `+` mark at the centre of the symbol (within 10 % of the middle) doesn't vote |
+| 7a. Battery check | `DrawnTopology._looks_like_battery` | A *Capacitor* whose plates (longest unbroken stroke across the lead axis) alternate long/short over ≥ 4 plates, or differ ≥ 1.6× over 2, becomes a *Battery* (then gets source polarity, 7b) |
+| 7c. Diode direction | `DrawnTopology._diode_reversed` | Ink width across the lead axis in the inner 20–45 % vs 55–80 % of the symbol: the triangle is narrow at the cathode bar. ≥ 1.3× difference → anode/cathode names set accordingly, else the default (anode left/top) |
 | 8. Filter | `DrawnTopology.build` | Ink touching only one box is a stub (usually text), not a wire. Boxes left with no wired contact are dropped and stages 5–7 re-run without them (up to 3 passes) |
 | 9. Nets | `DrawnTopology._nets` | Pins grouped by blob → `GND` / `VCC` / `N00x` |
 | 10. Netlist | `circuitmodel/netlist_generator.py` | `NetlistGenerator(interactive=False)` fills default values and builds SPICE lines; `recognizer` adds `component_details` and `dropped_detections` |
-| 11. Values | `value_reader` | OCR (§5) → each label assigned to the nearest part whose class it fits (each label used once) → overrides the default |
+| 11. Names + values | `value_reader` + `recognizer._rename` | OCR (§5), read twice (thickened strokes for handwriting, as-is for small print). **Designators** (`R5`, `V1`, `C2` …) go to the nearest part of a matching class and become its `ref_des`; the line directly under a designator is that part's value, re-read on its own (stray symbol ink at the strip's edge removed) when the full-image pass missed it. Parts without a designator: each remaining value label to the nearest part whose class it fits (each label used once) → overrides the default |
 
 **Why not the original `circuit_pipeline.py` stages?** They were tuned for ~4000 px phone photos. The fixed 150 px pin-snap distance merged every pin of a canvas drawing into one net, and pins were guessed from the box's aspect ratio (left/right unless tall). The ink-based engine has no absolute pixel thresholds; distances scale with the image. `circuitmodel` itself is unchanged and still used for YOLO, the data types and `NetlistGenerator`.
 

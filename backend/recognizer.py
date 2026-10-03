@@ -27,12 +27,22 @@ MODEL_DIR = Path(
     )
 )
 WEIGHTS = Path(
-    os.environ.get("CIRCUIT_MODEL_WEIGHTS", MODEL_DIR / "circuit_detector_v2_best.pt")
+    # os.environ.get("CIRCUIT_MODEL_WEIGHTS", MODEL_DIR / "circuit_detector_v2_best.pt")
+    os.environ.get("CIRCUIT_MODEL_WEIGHTS", MODEL_DIR / "circuit_detector_best.pt")
 )
 
 # Same tuning as circuit_pipeline.py
 YOLO_CONF       = 0.25
 YOLO_IOU        = 0.45
+# Extra views for slanted parts (degrees) and the confidence a symbol seen
+# only in those views needs to be kept.
+ROTATED_VIEWS     = (45, -45)
+ROTATED_ONLY_CONF = 0.5
+# Only parts people actually draw on a slant are taken from the rotated
+# views (rotated canvases make the model see e.g. grounds that aren't there),
+# and a rotated view's vote counts for less than the upright one's.
+ROTATED_CLASSES   = ("Resistor", "Inductor", "Capacitor", "Diode")
+ROTATED_WEIGHT    = 0.5
 
 if str(MODEL_DIR) not in sys.path:
     sys.path.insert(0, str(MODEL_DIR))
@@ -76,32 +86,154 @@ def decode_image(data: bytes) -> np.ndarray:
     return img
 
 
-def detect_boxes(image: np.ndarray) -> list:
+def _rotate(image: np.ndarray, angle: float):
+    """Rotate about the centre on an expanded canvas filled with the
+    background colour. Returns (rotated, inverse 2x3 affine back to image)."""
+    h, w = image.shape[:2]
+    m = cv2.getRotationMatrix2D((w / 2, h / 2), angle, 1.0)
+    cos, sin = abs(m[0, 0]), abs(m[0, 1])
+    nw, nh = int(h * sin + w * cos), int(h * cos + w * sin)
+    m[0, 2] += nw / 2 - w / 2
+    m[1, 2] += nh / 2 - h / 2
+    bg = tuple(int(v) for v in np.median(image.reshape(-1, 3), axis=0))
+    rotated = cv2.warpAffine(image, m, (nw, nh), borderValue=bg)
+    return rotated, cv2.invertAffineTransform(m)
+
+
+def _predict(image: np.ndarray, angle: float) -> list[tuple[str, float, np.ndarray]]:
+    """(class, conf, 4x2 corner polygon in original image coords) per box."""
+    model = _get_model()
+    src, inv = (image, None) if angle == 0 else _rotate(image, angle)
+    with _model_lock:
+        preds = model.predict(source=src, conf=YOLO_CONF, iou=YOLO_IOU, verbose=False)
+    out = []
+    for box in preds[0].boxes:
+        x1, y1, x2, y2 = box.xyxy[0].tolist()
+        poly = np.array([[x1, y1], [x2, y1], [x2, y2], [x1, y2]], np.float32)
+        if inv is not None:
+            poly = (np.hstack([poly, np.ones((4, 1), np.float32)]) @ inv.T).astype(np.float32)
+        out.append((model.names[int(box.cls.item())], float(box.conf.item()), poly))
+    return out
+
+
+def _same_symbol(a: np.ndarray, b: np.ndarray) -> bool:
+    """Two detections (from any rotation) cover the same drawn symbol."""
+    area_a, area_b = cv2.contourArea(a), cv2.contourArea(b)
+    small = max(min(area_a, area_b), 1.0)
+    if np.hypot(*(a.mean(0) - b.mean(0))) > 0.5 * np.sqrt(small):
+        return False
+    inter, _ = cv2.intersectConvexConvex(a, b)
+    return inter / small > 0.4
+
+
+def detect_boxes(image: np.ndarray, rotations: bool = True) -> list:
     """YOLO component detection only (no wires, no OCR): fast enough to run
-    while the user is still drawing."""
+    while the user is still drawing.
+
+    The detector was trained on axis-aligned symbols, so a resistor drawn on
+    a slant is often missed, mislabelled (e.g. as a capacitor) or boxed only
+    partly. With `rotations`, the image is also run rotated by ±45° — a slanted
+    part is upright in one of those views — and detections of the same symbol
+    are merged: the class with the most (weighted) confidence wins, and the
+    tightest box of that class gives the geometry. A box found in a rotated
+    view is returned as its axis-aligned bounds plus `poly`, the oriented
+    rectangle around the slanted symbol, which drawn_topology uses instead of
+    the bounds so it doesn't cut the wires running past the slanted part."""
     from wire_detector import BoundingBox
 
-    model = _get_model()
-    with _model_lock:
-        preds = model.predict(source=image, conf=YOLO_CONF, iou=YOLO_IOU, verbose=False)
+    dets = [(*d, 0) for d in _predict(image, 0)]
+    if rotations:
+        for angle in ROTATED_VIEWS:
+            dets += [(*d, angle) for d in _predict(image, angle) if d[0] in ROTATED_CLASSES]
 
-    names = model.names
+    # Greedy clustering, most confident first.
+    clusters: list[list[tuple]] = []
+    for det in sorted(dets, key=lambda d: -d[1]):
+        for cl in clusters:
+            if _same_symbol(cl[0][2], det[2]):
+                cl.append(det)
+                break
+        else:
+            clusters.append([det])
+
+    h, w = image.shape[:2]
     boxes: list[BoundingBox] = []
-    for box in preds[0].boxes:
-        x1, y1, x2, y2 = [int(v) for v in box.xyxy[0].tolist()]
-        boxes.append(BoundingBox(
-            x1=x1, y1=y1, x2=x2, y2=y2,
-            cls_name=names[int(box.cls.item())],
-            conf=float(box.conf.item()),
-        ))
+    for cl in clusters:
+        # A symbol only the rotated views see needs stronger evidence: the
+        # rotated canvases also show things the model was never trained on.
+        if all(d[3] != 0 for d in cl) and cl[0][1] < ROTATED_ONLY_CONF:
+            continue
+        votes: dict[str, float] = {}
+        for cls, conf, _, angle in cl:
+            votes[cls] = votes.get(cls, 0.0) + conf * (1.0 if angle == 0 else ROTATED_WEIGHT)
+        cls = max(votes, key=votes.get)
+        members = [d for d in cl if d[0] == cls]
+        best_conf = max(d[1] for d in members)
+        # Tightest box among confident members of the winning class; ties
+        # (within 10 %) go to the upright view.
+        members = [d for d in members if d[1] >= 0.6 * best_conf]
+        _, conf, poly, angle = min(
+            members, key=lambda d: cv2.contourArea(d[2]) * (1.0 if d[3] == 0 else 1.1)
+        )
+        poly[:, 0] = np.clip(poly[:, 0], 0, w - 1)
+        poly[:, 1] = np.clip(poly[:, 1], 0, h - 1)
+        x1, y1 = np.floor(poly.min(0)).astype(int)
+        x2, y2 = np.ceil(poly.max(0)).astype(int)
+        b = BoundingBox(x1=int(x1), y1=int(y1), x2=int(x2), y2=int(y2),
+                        cls_name=cls, conf=best_conf)
+        if angle != 0:
+            b.poly = poly.round().astype(np.int32)
+        boxes.append(b)
     return boxes
+
+
+def _rename(components, conn_result, topology, names: dict[str, str]) -> None:
+    """Give components their drawn reference designators ({old id: name}).
+    Unnamed parts keep their id unless a drawn name took it, in which case
+    they get the next free number with the same letter."""
+    import re
+    from connectivity_graph import PinRef
+
+    if not names:
+        return
+    taken = set(names.values())
+    mapping: dict[str, str] = {}
+    for comp in components:
+        old = comp.component_id
+        if old in names:
+            mapping[old] = names[old]
+            continue
+        new = old
+        if new in taken:
+            prefix = re.match(r"[A-Za-z]+", old).group(0)
+            n = 1
+            while f"{prefix}{n}" in taken:
+                n += 1
+            new = f"{prefix}{n}"
+        mapping[old] = new
+        taken.add(new)
+
+    for comp in components:
+        comp.component_id = mapping[comp.component_id]
+    for net in conn_result.nets:
+        net.pin_refs = {PinRef(mapping.get(p.component_id, p.component_id), p.pin_name, p.x, p.y)
+                        for p in net.pin_refs}
+    conn_result.pin_to_net = {
+        f"{mapping.get(uid.split('.', 1)[0], uid.split('.', 1)[0])}.{uid.split('.', 1)[1]}": net
+        for uid, net in conn_result.pin_to_net.items()
+    }
+    topology.polarity_method = {mapping.get(k, k): v for k, v in topology.polarity_method.items()}
+    # natural order: R2 before R10
+    components.sort(key=lambda c: (re.sub(r"\d+", "", c.component_id),
+                                   int(re.sub(r"\D", "", c.component_id) or 0)))
 
 
 def recognize(image: np.ndarray, title: str = "drawn-circuit") -> dict:
     """Run the full pipeline and return the netlist JSON dict."""
     from netlist_generator import NetlistGenerator
     from drawn_topology    import DrawnTopology
-    from value_reader      import assign_values, format_spice, run_ocr
+    from value_reader      import (assign_designators, assign_values, format_spice,
+                                   parse_item, read_designators, run_ocr)
 
     # ── 1. Component detection ──────────────────────────────────
     boxes = detect_boxes(image)
@@ -121,14 +253,34 @@ def recognize(image: np.ndarray, title: str = "drawn-circuit") -> dict:
             "be built. Make sure each wire runs right up to the component ends."
         )
 
-    # ── 5. Netlist (non-interactive: default component values) ──
+    # ── 5. Labels (OCR; defaults stay if unreadable/unavailable) ──
+    # Drawn names ("R5") rename their part, and the value written under a
+    # name is that part's value. Parts without a name fall back to the
+    # nearest unused value label.
+    ocr_items = run_ocr(image)
+    designators = read_designators(image, ocr_items)
+    named = assign_designators(components, designators)
+    _rename(components, conn_result, topology, {cid: d.name for cid, d in named.items()})
+
+    read: dict[str, tuple] = {}
+    label_items = set()
+    for d in designators:
+        label_items.add(id(d.item))
+        if d.value is not None:
+            label_items.add(id(d.value))
+    for comp in components:
+        d = next((d for d in named.values() if d.name == comp.component_id), None)
+        if d is not None and d.value is not None:
+            value, unit, inferred = parse_item(d.value, comp.cls_name)
+            if value is not None:
+                read[comp.component_id] = (value, unit, inferred)
+    rest = [c for c in components if c.component_id not in read]
+    read.update(assign_values(rest, [it for it in ocr_items if id(it) not in label_items]))
+
+    # ── 6. Netlist ──
     netlist = NetlistGenerator(interactive=False).generate(
         components, conn_result, title=title
     )
-
-    # ── 6. Handwritten values (OCR; defaults stay if unreadable/unavailable) ──
-    ocr_items = run_ocr(image)
-    read = assign_values(components, ocr_items)
     for entry in netlist.entries:
         if entry.ref_des in read:
             value, unit, _ = read[entry.ref_des]
@@ -148,6 +300,8 @@ def recognize(image: np.ndarray, title: str = "drawn-circuit") -> dict:
                 "cx": (comp.box.x1 + comp.box.x2) // 2,
                 "cy": (comp.box.y1 + comp.box.y2) // 2,
             },
+            **({"poly": comp.box.poly.tolist()}
+               if getattr(comp.box, "poly", None) is not None else {}),
             "conf": round(comp.box.conf, 3),
             "value_source": (
                 "default" if comp.component_id not in read

@@ -270,6 +270,30 @@ const TARGET_H      = 22; // target canvas height in grid units
 /** Tolerance (px) within which two coordinates are considered the same rail. */
 export const CLUSTER_TOLERANCE_PX = 50;
 
+/** A placed two-pin part spans 2 grid units; the drawn parts are laid out
+ *  at least this many grid units per drawn part length, so neighbours keep
+ *  a gap even when the image is small. */
+const MIN_GRID_PER_PART = 3;
+
+/** Median distance (px) between a two-pin part's pins in the image. */
+function medianPartLengthPx(details: JsonComponentDetail[]): number | null {
+  const spans = details
+    .filter((d) => d.pins.length === 2)
+    .map((d) => Math.hypot(d.pins[1].x - d.pins[0].x, d.pins[1].y - d.pins[0].y))
+    .filter((s) => s > 0)
+    .sort((a, b) => a - b);
+  return spans.length ? spans[Math.floor(spans.length / 2)] : null;
+}
+
+/** Rail-clustering tolerance for these parts: CLUSTER_TOLERANCE_PX, but
+ *  never more than 30 % of a part's drawn length — on a small image 50 px is
+ *  nearly a whole part, and would snap the two ends of a short series pair
+ *  onto one point. */
+export function clusterTolerancePx(details: JsonComponentDetail[]): number {
+  const len = medianPartLengthPx(details);
+  return len ? Math.min(CLUSTER_TOLERANCE_PX, 0.3 * len) : CLUSTER_TOLERANCE_PX;
+}
+
 export interface PixelToGrid {
   toGrid: (px: number, py: number) => { x: number; y: number };
   /** Variant that applies coordinate clustering before converting. */
@@ -314,11 +338,12 @@ export function buildPixelToGrid(
   details: JsonComponentDetail[],
   pinPixels?: { xs: number[]; ys: number[] }
 ): PixelToGrid {
-  // Build cluster maps in pixel space (50 px tolerance)
+  // Build cluster maps in pixel space (≤ 50 px, scaled to the part size)
   const allXs = pinPixels?.xs ?? details.map((d) => d.bbox.cx);
   const allYs = pinPixels?.ys ?? details.map((d) => d.bbox.cy);
-  const xCluster = clusterValues(allXs, CLUSTER_TOLERANCE_PX);
-  const yCluster = clusterValues(allYs, CLUSTER_TOLERANCE_PX);
+  const tolerance = clusterTolerancePx(details);
+  const xCluster = clusterValues(allXs, tolerance);
+  const yCluster = clusterValues(allYs, tolerance);
 
   // Derive extents from clustered values so the scale fits the snapped layout.
   const clusteredXs = [...new Set([...xCluster.values()])];
@@ -334,12 +359,19 @@ export function buildPixelToGrid(
   const innerW = TARGET_W - CANVAS_MARGIN * 2;
   const innerH = TARGET_H - CANVAS_MARGIN * 2;
 
-  // Uniform scale so the schematic isn't distorted.
-  const scale = Math.min(innerW / rangeX, innerH / rangeY);
+  // Uniform scale so the schematic isn't distorted. Fit the target area,
+  // but never so small that a drawn part shrinks below MIN_GRID_PER_PART
+  // (a crowded drawing then grows past the target area; the canvas pans).
+  const partPx = medianPartLengthPx(details);
+  const scale = Math.max(
+    Math.min(innerW / rangeX, innerH / rangeY),
+    partPx ? MIN_GRID_PER_PART / partPx : 0
+  );
 
   // Centre the circuit within the target area.
-  const offsetX = CANVAS_MARGIN + (innerW - rangeX * scale) / 2 - minX * scale;
-  const offsetY = CANVAS_MARGIN + (innerH - rangeY * scale) / 2 - minY * scale;
+  // A layout larger than the target area starts at the margin instead.
+  const offsetX = CANVAS_MARGIN + Math.max(0, (innerW - rangeX * scale) / 2) - minX * scale;
+  const offsetY = CANVAS_MARGIN + Math.max(0, (innerH - rangeY * scale) / 2) - minY * scale;
 
   const rawToGrid = (px: number, py: number) => ({
     x: snap(px * scale + offsetX),
@@ -365,13 +397,28 @@ export function buildPixelToGrid(
  * top/bottom for vertical ones), so the drawn symbol's orientation — and the
  * wires leaving it — match the source image instead of always defaulting to
  * a flat horizontal layout.
+ *
+ * A part drawn on a slant — its pins within DIAGONAL_TOLERANCE_DEG of 45° —
+ * is placed diagonally. Leftward diagonals are mirrored rather than turned
+ * past 90°, like horizontal parts, so the artwork never ends up upside down.
  */
+const DIAGONAL_TOLERANCE_DEG = 15;
+
 function computeOrientationFromPixels(
   p1: { x: number; y: number },
   p2: { x: number; y: number }
 ): { rotation: Rotation; mirrored: boolean } {
   const dx = p2.x - p1.x;
   const dy = p2.y - p1.y;
+  // Clockwise screen angle of pin[0] → pin[1], in (-180, 180].
+  const angle = (Math.atan2(dy, dx) * 180) / Math.PI;
+  const offAxis = Math.abs(angle) % 90;
+  if (Math.abs(offAxis - 45) <= DIAGONAL_TOLERANCE_DEG) {
+    if (dx > 0) return { rotation: dy > 0 ? 45 : 315, mirrored: false };
+    // Mirroring flips pin[0] to the right, reversing the direction: a
+    // mirrored part at 315° runs down-left, at 45° up-left.
+    return { rotation: dy > 0 ? 315 : 45, mirrored: true };
+  }
   if (Math.abs(dx) >= Math.abs(dy)) {
     // Horizontal: mirror when pin[0] is actually on the right in the photo.
     return { rotation: 0, mirrored: dx < 0 };

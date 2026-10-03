@@ -10,6 +10,8 @@ values instead of defaults.
   value_near_box(box, cls, items) → (SI value, unit) for one component
   assign_values(boxes, items)     → best label per component, each label used once
   format_spice(value, unit, cls)  → "7k", "0.6u", "DC 4", …
+  read_designators(image, items)  → printed/handwritten names ("R5") + the value under each
+  assign_designators(comps, ds)   → which name labels which component
 
 OCR is optional: without an engine every component keeps its default value.
 Handwriting OCR is noisy, so parsing is deliberately forgiving (O→0, l→1,
@@ -112,7 +114,9 @@ def ocr_available() -> bool:
 
 # Only characters a value label can contain. easyocr's English charset has no
 # Ω or µ; they come back as look-alikes (n, 4, u, …) handled in parse_value.
-_OCR_ALLOWLIST = "0123456789.kKmMuUnNpPvVfFhH"
+# R / L / C / D (with V, already there) also let designators like "R5" be read
+# as names instead of being forced into digits ("R5" → "35").
+_OCR_ALLOWLIST = "0123456789.kKmMuUnNpPvVfFhHRLCD"
 # Long side (px) the image is resampled to for OCR. Chosen empirically on
 # the canvas test drawing; larger was slower and read fewer labels.
 OCR_LONG_SIDE = 1650
@@ -124,7 +128,8 @@ def run_ocr(image: np.ndarray) -> list[OcrItem]:
 
     Thin pen strokes OCR badly and results shift with resolution, so the
     image is resampled to a fixed working size and strokes are thickened
-    before recognition."""
+    before recognition. Thickening blurs small printed labels together, so
+    the unthickened image is read too and the two readings merged."""
     global _reader
     if not ocr_available():
         return []
@@ -137,14 +142,17 @@ def run_ocr(image: np.ndarray) -> list[OcrItem]:
     scale = OCR_LONG_SIDE / max(gray.shape)
     gray = cv2.resize(gray, None, fx=scale, fy=scale,
                       interpolation=cv2.INTER_CUBIC if scale > 1 else cv2.INTER_AREA)
-    gray = cv2.erode(gray, np.ones((3, 3), np.uint8))   # dark ink → thicker
+    thick = cv2.erode(gray, np.ones((3, 3), np.uint8))   # dark ink → thicker
 
-    items = []
-    for quad, text, conf in _reader.readtext(gray, allowlist=_OCR_ALLOWLIST):
-        xs = [p[0] / scale for p in quad]
-        ys = [p[1] / scale for p in quad]
-        items.append(OcrItem(text, int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys)), float(conf)))
-    items = merge_line_items(items)
+    passes = []
+    for img in (thick, gray):
+        found = []
+        for quad, text, conf in _reader.readtext(img, allowlist=_OCR_ALLOWLIST):
+            xs = [p[0] / scale for p in quad]
+            ys = [p[1] / scale for p in quad]
+            found.append(OcrItem(text, int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys)), float(conf)))
+        passes.append(found)
+    items = merge_line_items(_merge_passes(*passes))
 
     orig_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
     for it in items:
@@ -225,6 +233,34 @@ def clean_handwriting(text: str) -> str:
     text = re.sub(r"[^0-9.,a-zA-ZΩµμ]", "", text)
     m = re.search(r"[0-9.]", text)
     return text[m.start():].rstrip(".,") if m else ""
+
+
+def _iou(a: OcrItem, b: OcrItem) -> float:
+    iw = min(a.x2, b.x2) - max(a.x1, b.x1)
+    ih = min(a.y2, b.y2) - max(a.y1, b.y1)
+    if iw <= 0 or ih <= 0:
+        return 0.0
+    inter = iw * ih
+    return inter / ((a.x2 - a.x1) * (a.y2 - a.y1) + (b.x2 - b.x1) * (b.y2 - b.y1) - inter)
+
+
+def _merge_passes(first: list[OcrItem], second: list[OcrItem]) -> list[OcrItem]:
+    """Union of two readings of the same image. Where both read the same
+    spot, keep a well-formed designator over anything else, then the more
+    confident reading."""
+    def rank(it: OcrItem):
+        return (parse_designator(it.text) is not None, it.conf)
+
+    out = list(first)
+    for it in second:
+        same = [i for i, o in enumerate(out) if _iou(o, it) > 0.3]
+        if not same:
+            out.append(it)
+        elif all(rank(it) > rank(out[i]) for i in same):
+            for i in sorted(same, reverse=True):
+                del out[i]
+            out.append(it)
+    return out
 
 
 def merge_line_items(items: list[OcrItem]) -> list[OcrItem]:
@@ -355,6 +391,141 @@ def parse_item(item: OcrItem, cls_name: str | None) -> tuple[float | None, str |
 
     value, unit, inferred, _ = max(parsed, key=score)   # max keeps the first on ties
     return value, unit, inferred
+
+
+# ── Designators ("R5", "V1") ────────────────────────────────────
+#
+# Printed schematics (and tidy drawings) name each part, usually with its
+# value on the line below:   R5
+#                            12
+# The name gives the part its reference designator, and the line under it is
+# the value: far more reliable than "nearest number to the symbol", which on
+# a dense schematic picks up a neighbour's label.
+
+# Designator letter → detector classes it can name.
+DESIGNATOR_CLASSES = {
+    "R": ("Resistor",),
+    "C": ("Capacitor",),
+    "L": ("Inductor",),
+    "D": ("Diode",),
+    "V": ("Voltage", "Battery", "AC Source"),
+}
+_DESIGNATOR_RE = re.compile(r"^([RCLDV])([0-9OoIl|]{1,3})$")
+# Characters a value line may hold when re-read on its own.
+_VALUE_ALLOWLIST = "0123456789.kKmMuUnNpPvVfFhH"
+
+
+def parse_designator(text: str) -> str | None:
+    """'R5' -> 'R5', with OCR look-alikes in the number fixed ('Rl0' -> 'R10').
+    None for anything else, including 'R0' (numbers never start at 0)."""
+    m = _DESIGNATOR_RE.match(text.strip())
+    if not m:
+        return None
+    num = m.group(2).translate(_DIGIT_FIXES)
+    if not num.isdigit() or num.startswith("0"):
+        return None
+    return m.group(1) + num
+
+
+@dataclass
+class Designator:
+    name: str                       # "R5"
+    item: OcrItem                   # where the name is written
+    value: OcrItem | None = None    # the value line under it, if found
+
+
+def read_designators(image: np.ndarray, items: list[OcrItem]) -> list[Designator]:
+    """Designator labels among `items`, each paired with the value written
+    directly under it. A value the full-image OCR missed (small single
+    digits often are) is re-read from just that spot."""
+    found = [Designator(n, it) for it in items if (n := parse_designator(it.text))]
+    taken: set[int] = set()
+    for d in found:
+        it = d.item
+        h = max(it.y2 - it.y1, 1)
+        below = [
+            (o.y1 - it.y2, i) for i, o in enumerate(items)
+            if i not in taken and parse_designator(o.text) is None
+            and min(o.x2, it.x2) - max(o.x1, it.x1) > 0          # overlaps in x
+            and -0.3 * h <= o.y1 - it.y2 <= 0.8 * h
+        ]
+        if below:
+            _, i = min(below)
+            taken.add(i)
+            d.value = items[i]
+        else:
+            d.value = _reread_below(image, it)
+    return found
+
+
+def _reread_below(image: np.ndarray, it: OcrItem) -> OcrItem | None:
+    """OCR just the strip under a designator, about one text line tall."""
+    if _reader is None:
+        return None
+    import cv2
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
+    h = max(it.y2 - it.y1, 1)
+    x1, x2 = max(0, it.x1 - h // 2), min(gray.shape[1], it.x2 + h)
+    y1, y2 = it.y2, min(gray.shape[0], it.y2 + int(1.3 * h))
+    crop = gray[y1:y2, x1:x2].copy()
+    if crop.size == 0:
+        return None
+    # Keep only free-standing glyphs: ink touching the strip's edge belongs to
+    # a symbol or wire running past (a zigzag tip reads as ">" or "^").
+    _, ink = cv2.threshold(crop, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    n, lab, stats, _ = cv2.connectedComponentsWithStats(ink, connectivity=8)
+    ch, cw = crop.shape
+    for i in range(1, n):
+        x, y, w, hh, _ = stats[i]
+        if x == 0 or y == 0 or x + w >= cw or y + hh >= ch:
+            crop[lab == i] = 255
+    ys, xs = np.nonzero(crop < 128)
+    if ys.size == 0:
+        return None
+    # Tight around the glyphs, then recognise directly: the text detector
+    # tends to miss a lone small character.
+    crop = crop[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
+    s = 48 / crop.shape[0]
+    crop = cv2.resize(crop, None, fx=s, fy=s, interpolation=cv2.INTER_CUBIC)
+    crop = cv2.copyMakeBorder(crop, 12, 12, 12, 12, cv2.BORDER_CONSTANT, value=255)
+    res = _reader.recognize(crop, allowlist=_VALUE_ALLOWLIST)
+    if not res:
+        return None
+    _, text, conf = max(res, key=lambda r: r[2])
+    # Low bar: the spot (an isolated glyph right under a name) and the
+    # charset are already narrow, and the reading must still parse as a value.
+    if conf < 0.05:
+        return None
+    return OcrItem(text, x1, y1, x2, y2, float(conf))
+
+
+def assign_designators(components, designators: list[Designator]) -> dict[str, Designator]:
+    """{component_id: Designator}: each name goes to the nearest component
+    of a class it can name (closest pairs first, each used once)."""
+    pairs = []
+    for comp in components:
+        box = comp.box
+        reach = 1.5 * max(box.x2 - box.x1, box.y2 - box.y1)
+        for j, d in enumerate(designators):
+            if comp.cls_name not in DESIGNATOR_CLASSES.get(d.name[0], ()):
+                continue
+            dist = _box_distance(box, d.item)
+            if d.value is not None:
+                dist = min(dist, _box_distance(box, d.value))
+            if dist <= reach:
+                pairs.append((dist, comp, j))
+    pairs.sort(key=lambda p: p[0])
+    out: dict[str, Designator] = {}
+    used: set[int] = set()
+    names: set[str] = set()
+    for _, comp, j in pairs:
+        d = designators[j]
+        if comp.component_id in out or j in used or d.name in names:
+            continue
+        out[comp.component_id] = d
+        used.add(j)
+        names.add(d.name)
+    return out
 
 
 # ── Matching labels to components ───────────────────────────────

@@ -13,8 +13,10 @@ export type ComponentKind =
   | "diode"
   | "ground";
 
-/** 0/90/180/270 degrees, clockwise. */
-export type Rotation = 0 | 90 | 180 | 270;
+/** Degrees clockwise, in 45° steps. The diagonal ones place a part on a
+ *  slant (e.g. as drawn in an imported image): its pins land on the grid
+ *  diagonal, so the part is stretched by √2 along its axis. */
+export type Rotation = 0 | 45 | 90 | 135 | 180 | 225 | 270 | 315;
 
 /** A single connection point on a component, in the component's own
  *  unmirrored, unrotated local coordinate space (grid units, origin at

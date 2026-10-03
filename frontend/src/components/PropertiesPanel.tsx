@@ -47,6 +47,9 @@ export function PropertiesPanel() {
         <button className="btn" onClick={() => rotateComponent(component.id)}>
           Rotate (R)
         </button>
+        <button className="btn" onClick={() => rotateComponent(component.id, 45)}>
+          Rotate 45° (Shift+R)
+        </button>
         <button className="btn" onClick={() => mirrorComponent(component.id)}>
           Mirror (M)
         </button>

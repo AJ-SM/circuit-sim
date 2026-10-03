@@ -42,14 +42,14 @@ export function SchematicCanvas() {
   // knows NOT to cancel an in-progress wire (the pin already finished it).
   const wireFinalizedByPin = useRef(false);
 
-  // --- keyboard shortcuts: delete / rotate / mirror the selection ---
+  // --- keyboard shortcuts: delete / rotate (R 90°, Shift+R 45°) / mirror the selection ---
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (e.key === "Delete" || e.key === "Backspace") {
         if ((e.target as HTMLElement)?.tagName === "INPUT") return;
         deleteSelected();
       } else if (e.key.toLowerCase() === "r" && selection?.type === "component") {
-        rotateComponent(selection.id);
+        rotateComponent(selection.id, e.shiftKey ? 45 : 90);
       } else if (e.key.toLowerCase() === "m" && selection?.type === "component") {
         mirrorComponent(selection.id);
       } else if (e.key === "Escape") {

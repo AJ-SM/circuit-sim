@@ -50,6 +50,11 @@ def binarize(image: np.ndarray) -> np.ndarray:
     """Ink mask (uint8 0/1). Otsu suits clean canvas exports; for photos with
     uneven lighting, AND it with an adaptive threshold to reject shadows."""
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    if np.median(gray) < 128:
+        # Dark canvas with light strokes: flip so ink is dark, otherwise the
+        # dark halo either side of each stroke is taken as ink and every wire
+        # splits into two unconnected outlines.
+        gray = 255 - gray
     gray = cv2.GaussianBlur(gray, (3, 3), 0)
     _, otsu = cv2.threshold(gray, 0, 1, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
     block = max(15, (min(gray.shape) // 20) | 1)
@@ -60,21 +65,30 @@ def binarize(image: np.ndarray) -> np.ndarray:
     return otsu if clean else (otsu & adaptive)
 
 
+def box_poly(b: BoundingBox) -> np.ndarray:
+    """The symbol's outline as an int32 4x2 polygon: the oriented rectangle
+    for a part detected on a slant (recognizer sets `poly`), else the box."""
+    poly = getattr(b, "poly", None)
+    if poly is not None:
+        return poly
+    return np.array([[b.x1, b.y1], [b.x2, b.y1], [b.x2, b.y2], [b.x1, b.y2]], np.int32)
+
+
 def dedupe_boxes(boxes: list[BoundingBox]) -> list[BoundingBox]:
     """Class-agnostic suppression: the detector sometimes fires two classes
-    on one symbol. Keep the more confident box when two mostly overlap."""
+    on one symbol. Keep the more confident box when two mostly overlap, or
+    when they partly overlap and the other is far less confident (e.g. a
+    battery's plates also read, weakly, as a ground symbol)."""
     kept: list[BoundingBox] = []
     for b in sorted(boxes, key=lambda b: -b.conf):
-        area_b = (b.x2 - b.x1) * (b.y2 - b.y1)
+        pb = box_poly(b).astype(np.float32)
+        area_b = cv2.contourArea(pb)
         dup = False
         for k in kept:
-            iw = min(b.x2, k.x2) - max(b.x1, k.x1)
-            ih = min(b.y2, k.y2) - max(b.y1, k.y1)
-            if iw <= 0 or ih <= 0:
-                continue
-            inter = iw * ih
-            area_k = (k.x2 - k.x1) * (k.y2 - k.y1)
-            if inter / min(area_b, area_k) > 0.7:
+            pk = box_poly(k).astype(np.float32)
+            inter, _ = cv2.intersectConvexConvex(pb, pk)
+            frac = inter / max(min(area_b, cv2.contourArea(pk)), 1.0)
+            if frac > 0.7 or (frac > 0.3 and b.conf < 0.6 * k.conf):
                 dup = True
                 break
         if not dup:
@@ -91,20 +105,117 @@ class DrawnTopology:
         self.gap = max(3, int(diag * 0.004)) | 1    # stroke gaps to close
         self.min_contact = 3
         self.bridge = max(8, int(diag * 0.03))       # max hand-drawn gap between wire ends
+        # typical stroke width: twice the median distance-to-background on the skeleton
+        skel = skeletonize(self.ink > 0)
+        dist = cv2.distanceTransform(self.ink, cv2.DIST_L2, 3)
+        self.stroke = max(2.0, 2.0 * float(np.median(dist[skel]))) if skel.any() else 3.0
         # ref_des → how a source's polarity was decided: "marks" | "plates" | "default"
         self.polarity_method: dict[str, str] = {}
+
+    # ── box tightening ────────────────────────────────────────────
+    def _tighten(self, box: BoundingBox) -> BoundingBox:
+        """Detector boxes are loose, and a loose box erases the wires that
+        pass close to the symbol (a junction just past its end, a wire
+        running along its side), splitting nets. Pull each edge in while the
+        stroke-wide strip along it holds only wire ink (see `wire_only`), at
+        most 30 % per side. Slanted (polygon) boxes are already tight;
+        grounds keep their box (their bars are short runs that would peel)."""
+        if getattr(box, "poly", None) is not None or box.cls_name == "Ground":
+            return box
+        h, w = self.ink.shape
+        x1, y1, x2, y2 = max(box.x1, 0), max(box.y1, 0), min(box.x2, w), min(box.y2, h)
+        if x2 - x1 < 8 or y2 - y1 < 8:
+            return box
+        k = max(1, int(round(self.stroke)))
+        short = 3 * self.stroke + k         # a slanted wire widens across the band
+        # ink with a k-px margin so the line just outside each edge exists
+        pad = np.zeros((y2 - y1 + 2 * k, x2 - x1 + 2 * k), np.uint8)
+        sy1, sy2, sx1, sx2 = max(y1 - k, 0), min(y2 + k, h), max(x1 - k, 0), min(x2 + k, w)
+        pad[sy1 - (y1 - k):sy2 - (y1 - k), sx1 - (x1 - k):sx2 - (x1 - k)] = self.ink[sy1:sy2, sx1:sx2]
+
+        # Plate symbols: a plate is a long straight run across the leads, so
+        # only thin runs (leads) may peel — never one along the edge.
+        strict = box.cls_name in ("Capacitor", "Battery")
+
+        def runs(line: np.ndarray) -> list[np.ndarray]:
+            idx = np.flatnonzero(line)
+            return np.split(idx, np.flatnonzero(np.diff(idx) > 2) + 1) if idx.size else []
+
+        def wire_only(band: np.ndarray, outside: np.ndarray, axis: int,
+                      leads: list[float] | None) -> bool:
+            """`band` is the strip just inside the edge, collapsed to a line so
+            a wobbly wire counts as one run. Each run must continue ink from
+            outside the edge (ink that starts inside the box is the symbol)
+            and be a wire: reaching the box side (running along the edge),
+            joined to outside ink at both ends (bending through the strip), or
+            short (crossing the edge). On an edge the leads pass through,
+            `leads` tracks each lead's position and a short run must follow
+            one closely from step to step: a lead runs (nearly) straight in,
+            while a zigzag stroke — just as thin — slants away sideways by
+            over a pixel per step. Updates `leads` in place."""
+            line = band.any(axis=axis)
+            moved: list[tuple[int, float]] = []
+            out = np.convolve(outside.any(axis=axis), np.ones(5), "same") > 0
+            n = line.size
+            for run in runs(line):
+                lo, hi = run[0], run[-1]
+                if not out[lo:hi + 1].any():
+                    return False
+                if not strict and (lo <= 2 or hi >= n - 3):
+                    continue
+                if not strict and out[lo:lo + k].any() and out[hi - k + 1:hi + 1].any() and hi - lo + 1 > short:
+                    continue
+                if hi - lo + 1 > short:
+                    return False
+                if leads is not None:
+                    c = (lo + hi) / 2
+                    j = int(np.argmin([abs(c - p) for p in leads])) if leads else -1
+                    if j < 0 or abs(c - leads[j]) > 1.0:
+                        return False
+                    moved.append((j, c))
+            if leads is not None:
+                for j, c in moved:
+                    leads[j] = c
+            return True
+
+        H, W = y2 - y1, x2 - x1
+        # Edges crossed by the leads: top/bottom for a tall box, left/right
+        # for a wide one, all four when it's about square.
+        lead_tb = H >= W / 1.15
+        lead_lr = W >= H / 1.15
+        top, bot, left, right = 0, H, 0, W            # box edges, crop coords
+        max_dy, max_dx = int(0.3 * H), int(0.3 * W)
+        P = lambda r0, r1, c0, c1: pad[r0 + k:r1 + k, c0 + k:c1 + k]
+
+        def entry(band: np.ndarray, axis: int, lead_edge: bool):
+            return [float(r.mean()) for r in runs(band.any(axis=axis))] if lead_edge else None
+
+        e = entry(P(0, k, 0, W), 0, lead_tb)
+        while top < max_dy and wire_only(P(top, top + k, left, right), P(top - k, top, left, right), 0, e):
+            top += 1
+        e = entry(P(H - k, H, 0, W), 0, lead_tb)
+        while H - bot < max_dy and wire_only(P(bot - k, bot, left, right), P(bot, bot + k, left, right), 0, e):
+            bot -= 1
+        e = entry(P(top, bot, 0, k), 1, lead_lr)
+        while left < max_dx and wire_only(P(top, bot, left, left + k), P(top, bot, left - k, left), 1, e):
+            left += 1
+        e = entry(P(top, bot, W - k, W), 1, lead_lr)
+        while W - right < max_dx and wire_only(P(top, bot, right - k, right), P(top, bot, right, right + k), 1, e):
+            right -= 1
+        return BoundingBox(x1=x1 + left, y1=y1 + top, x2=x1 + right, y2=y1 + bot,
+                           cls_name=box.cls_name, conf=box.conf)
 
     # ── wire blobs ────────────────────────────────────────────────
     def _wire_labels(self, boxes: list[BoundingBox]) -> np.ndarray:
         wires = self.ink.copy()
         for b in boxes:
-            wires[max(b.y1, 0):b.y2, max(b.x1, 0):b.x2] = 0
+            cv2.fillConvexPoly(wires, box_poly(b), 0)
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (self.gap, self.gap))
         wires = cv2.morphologyEx(wires, cv2.MORPH_CLOSE, kernel)
         # Closing may bleed back into boxes; keep them empty so contacts are
         # only ever measured in the ring outside.
         for b in boxes:
-            wires[max(b.y1, 0):b.y2, max(b.x1, 0):b.x2] = 0
+            cv2.fillConvexPoly(wires, box_poly(b), 0)
         _, labels = cv2.connectedComponents(wires, connectivity=8)
         return self._bridge_gaps(labels, boxes)
 
@@ -122,10 +233,11 @@ class DrawnTopology:
         ys, xs = np.nonzero((skel == 1) & (neighbours == 1))
 
         h, w = labels.shape
-        near_box = np.zeros((h, w), bool)
-        r = self.ring * 2
+        near_box = np.zeros((h, w), np.uint8)
         for b in boxes:
-            near_box[max(b.y1 - r, 0):b.y2 + r, max(b.x1 - r, 0):b.x2 + r] = True
+            cv2.fillConvexPoly(near_box, box_poly(b), 1)
+        r = self.ring * 2
+        near_box = cv2.dilate(near_box, np.ones((2 * r + 1, 2 * r + 1), np.uint8)).astype(bool)
 
         parent = list(range(n + 1))
 
@@ -160,8 +272,11 @@ class DrawnTopology:
         x1, y1 = max(box.x1 - r, 0), max(box.y1 - r, 0)
         x2, y2 = min(box.x2 + r, w), min(box.y2 + r, h)
         window = labels[y1:y2, x1:x2].copy()
-        # blank the box interior (already empty, but be explicit)
-        window[max(box.y1 - y1, 0):box.y2 - y1, max(box.x1 - x1, 0):box.x2 - x1] = 0
+        # Ring = the symbol's outline grown by `r`, minus the outline itself.
+        inside = np.zeros(window.shape, np.uint8)
+        cv2.fillConvexPoly(inside, box_poly(box) - np.array([x1, y1], np.int32), 1)
+        ring = cv2.dilate(inside, np.ones((2 * r + 1, 2 * r + 1), np.uint8))
+        window[(ring == 0) | (inside == 1)] = 0
         hit = (window > 0).astype(np.uint8)
         n, clusters, stats, cents = cv2.connectedComponentsWithStats(hit, connectivity=8)
         out: list[_Contact] = []
@@ -177,7 +292,7 @@ class DrawnTopology:
     # ── public ────────────────────────────────────────────────────
     def build(self, boxes: list[BoundingBox]):
         """Returns (components, conn_result, dropped_boxes)."""
-        boxes = dedupe_boxes(boxes)
+        boxes = [self._tighten(b) for b in dedupe_boxes(boxes)]
         dropped: list[BoundingBox] = []
         for _ in range(3):
             labels = self._wire_labels(boxes)
@@ -203,13 +318,20 @@ class DrawnTopology:
         pin_blob: dict[str, int | None] = {}
 
         for b in boxes:
+            pins, blobs = self._make_pins(b, contacts[id(b)])
+            if b.cls_name == "Capacitor" and self._looks_like_battery(b, pins):
+                # The detector often calls a battery a capacitor.
+                b.cls_name = "Battery"
+                pins, blobs = self._make_pins(b, contacts[id(b)])
             prefix = REFDES_PREFIX.get(b.cls_name, "X")
             counters[prefix] = counters.get(prefix, 0) + 1
             ref = f"{prefix}{counters[prefix]}"
-            pins, blobs = self._make_pins(b, contacts[id(b)])
             if b.cls_name in SOURCE_CLASSES:
                 pins, method = self._orient_source(b, pins)
                 self.polarity_method[ref] = method
+            elif b.cls_name == "Diode" and self._diode_reversed(b, pins):
+                # names only; list order stays positional (paired with blobs)
+                pins = [Pin("cathode" if p.name == "anode" else "anode", p.x, p.y) for p in pins]
             components.append(ComponentTerminal(ref, b.cls_name, b, pins))
             for p, blob in zip(pins, blobs):
                 pin_blob[f"{ref}.{p.name}"] = blob
@@ -217,19 +339,21 @@ class DrawnTopology:
         return components, self._nets(components, pin_blob), dropped
 
     def _make_pins(self, box: BoundingBox, contacts: list[_Contact]):
-        cx, cy = (box.x1 + box.x2) / 2, (box.y1 + box.y2) / 2
+        poly = box_poly(box).astype(np.float64)
+        cx, cy = poly[:, 0].mean(), poly[:, 1].mean()
 
         def on_edge(x: float, y: float) -> tuple[int, int]:
-            """Project a contact onto the nearest box edge."""
-            x = min(max(x, box.x1), box.x2)
-            y = min(max(y, box.y1), box.y2)
-            d = {"l": x - box.x1, "r": box.x2 - x, "t": y - box.y1, "b": box.y2 - y}
-            side = min(d, key=d.get)
-            if side == "l": x = box.x1
-            if side == "r": x = box.x2
-            if side == "t": y = box.y1
-            if side == "b": y = box.y2
-            return int(round(x)), int(round(y))
+            """Project a contact onto the nearest point of the outline."""
+            best, best_d = (x, y), np.inf
+            for (ax, ay), (bx, by) in zip(poly, np.roll(poly, -1, axis=0)):
+                dx, dy = bx - ax, by - ay
+                t = ((x - ax) * dx + (y - ay) * dy) / max(dx * dx + dy * dy, 1e-9)
+                t = min(max(t, 0.0), 1.0)
+                px, py = ax + t * dx, ay + t * dy
+                d = (px - x) ** 2 + (py - y) ** 2
+                if d < best_d:
+                    best, best_d = (px, py), d
+            return int(round(best[0])), int(round(best[1]))
 
         if box.cls_name == "Ground":
             c = max(contacts, key=lambda c: c.size)
@@ -288,6 +412,32 @@ class DrawnTopology:
             pins = [Pin("-" if p.name == "+" else "+", p.x, p.y) for p in pins]
         return pins, method
 
+    def _diode_reversed(self, box: BoundingBox, pins: list[Pin]) -> bool:
+        """True when the drawing puts the cathode at the pin named "anode".
+        The triangle is narrow at the cathode bar and wide at its base, so
+        compare the ink's width across the lead axis in the inner part of the
+        symbol (the bar and the base, both full width, sit at the ends)."""
+        a, c = (pins[0], pins[1]) if pins[0].name == "anode" else (pins[1], pins[0])
+        crop = self._crop(box).astype(bool)
+        horizontal = abs(c.x - a.x) >= abs(c.y - a.y)
+        prof_src = crop if horizontal else crop.T      # columns step along the axis
+        n = prof_src.shape[1]
+        if n < 10:
+            return False
+        span = np.zeros(n)
+        for i in range(n):
+            rows = np.flatnonzero(prof_src[:, i])
+            if rows.size:
+                span[i] = rows[-1] - rows[0] + 1
+        near_low = float(span[int(0.2 * n):int(0.45 * n)].mean())   # low index side
+        near_high = float(span[int(0.55 * n):int(0.8 * n)].mean())
+        if max(near_low, near_high) < 1.3 * max(min(near_low, near_high), 1.0):
+            return False                               # can't tell: keep default
+        narrow_low = near_low < near_high
+        a_along = (a.x - box.x1) if horizontal else (a.y - box.y1)
+        anode_low = a_along < n / 2
+        return narrow_low == anode_low                 # anode at the narrow (bar) end
+
     def _crop(self, box: BoundingBox) -> np.ndarray:
         return self.ink[max(box.y1, 0):box.y2, max(box.x1, 0):box.x2]
 
@@ -322,6 +472,8 @@ class DrawnTopology:
             ink = int(np.count_nonzero(crop[lab == i]))
             fill = ink / float(bw * bh)
             t = self._along(box, pos, neg, *cents[i])
+            if abs(t - 0.5) < 0.1:
+                continue                      # centred mark says nothing about ends
             if longest / shortest >= 2.5 and bw > bh:
                 minus_t.append(t)
             elif longest / shortest < 1.8 and fill < 0.55:
@@ -331,6 +483,36 @@ class DrawnTopology:
         if not votes or (any(votes) and not all(votes)):
             return None                       # nothing found, or contradictory
         return pos if votes[0] else neg
+
+    def _looks_like_battery(self, box: BoundingBox, pins: list[Pin]) -> bool:
+        """Plates across the lead axis, measured as the longest unbroken
+        stroke at each step along it (labels beside the symbol don't count).
+        A battery's alternate long (+) and short (−): four or more plates
+        alternating, or two differing by ≥ 1.6×. A capacitor's are equal."""
+        crop = self._crop(box).astype(bool)
+        a, b = pins[0], pins[1]
+        src = crop if abs(b.x - a.x) >= abs(b.y - a.y) else crop.T   # columns step along the axis
+        across = src.shape[0]
+        if across < 8:
+            return False
+        longest = np.zeros(src.shape[1])
+        for i in range(src.shape[1]):
+            idx = np.flatnonzero(src[:, i])
+            if idx.size:
+                longest[i] = max(len(r) for r in np.split(idx, np.flatnonzero(np.diff(idx) > 1) + 1))
+        plates, start = [], None
+        for i, v in enumerate(np.append(longest >= 0.35 * across, False)):
+            if v and start is None:
+                start = i
+            elif not v and start is not None:
+                plates.append(float(longest[start:i].max()))
+                start = None
+        if len(plates) == 2:
+            return max(plates) >= 1.6 * min(plates)
+        if len(plates) >= 4:
+            steps = [p / q for p, q in zip(plates, plates[1:])]
+            return all(r >= 1.2 for r in steps[::2]) and all(r <= 1 / 1.2 for r in steps[1::2])                 or all(r <= 1 / 1.2 for r in steps[::2]) and all(r >= 1.2 for r in steps[1::2])
+        return False
 
     def _plus_from_plates(self, box: BoundingBox, pos: Pin, neg: Pin) -> Pin | None:
         """Battery symbol: two parallel plates across the lead axis, the

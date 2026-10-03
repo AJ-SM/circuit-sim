@@ -16,9 +16,22 @@ export function pxToGrid(value: number): number {
   return value / GRID_SIZE;
 }
 
+/** True for the 45° rotations, which put a part on a slant. */
+export function isDiagonal(rotation: Rotation): boolean {
+  return rotation % 90 !== 0;
+}
+
+/** Along-axis stretch of a part's artwork: a diagonal part's pins sit on
+ *  the grid diagonal, √2 farther from its centre than an upright part's. */
+export function axisScale(rotation: Rotation): number {
+  return isDiagonal(rotation) ? Math.SQRT2 : 1;
+}
+
 /** Rotate a local point by a component's rotation, then apply mirroring
  *  (mirror flips the local X axis before rotation, matching how most
- *  schematic tools define "flip horizontal"). Returns local-space point. */
+ *  schematic tools define "flip horizontal"). Returns local-space point.
+ *  Diagonal rotations also stretch by √2 so pins stay on grid points:
+ *  (1, 0) at 45° → (1, 1). */
 export function transformLocal(
   local: { x: number; y: number },
   rotation: Rotation,
@@ -28,11 +41,12 @@ export function transformLocal(
   if (mirrored) x = -x;
 
   const rad = (rotation * Math.PI) / 180;
-  const cos = Math.round(Math.cos(rad));
-  const sin = Math.round(Math.sin(rad));
+  const k = axisScale(rotation);
+  const cos = Math.cos(rad) * k;
+  const sin = Math.sin(rad) * k;
   return {
-    x: x * cos - y * sin,
-    y: x * sin + y * cos,
+    x: Math.round(x * cos - y * sin),
+    y: Math.round(x * sin + y * cos),
   };
 }
 
@@ -53,7 +67,8 @@ export function distance(
 }
 
 /** Unit direction a pin points out of its component (e.g. {0,-1} for the
- *  top pin of a vertical part), used to route wires away from the body. */
+ *  top pin of a vertical part, {1,1} for the lower-right pin of a diagonal
+ *  one), used to route wires away from the body. */
 export function pinDirection(
   component: ComponentInstance,
   pin: PinDef
@@ -72,7 +87,9 @@ const PIN_STUB = 1;
  *  direction, never back across the part's body: the plain L / Z shapes
  *  are used when they satisfy that, otherwise the wire steps out of each
  *  pin by PIN_STUB and is routed between the stubs. Without directions it
- *  leaves horizontally first, which reads well for left/right parts. */
+ *  leaves horizontally first, which reads well for left/right parts.
+ *  A diagonal pin may be left along either component of its direction,
+ *  and its stub is a 45° step. */
 export function orthogonalPath(a: Pt, b: Pt, dirA?: Pt, dirB?: Pt): Pt[] {
   if (!dirA && !dirB) {
     if (a.x === b.x || a.y === b.y) return [a, b];
@@ -156,14 +173,27 @@ function simplify(path: Pt[]): Pt[] {
   });
 }
 
+/** Every segment horizontal or vertical, except that the first and last
+ *  may be a 45° stub out of a diagonal pin. */
 function isOrthogonal(path: Pt[]): boolean {
-  return path.every((p, i) => i === 0 || p.x === path[i - 1].x || p.y === path[i - 1].y);
+  return path.every((p, i) => {
+    if (i === 0) return true;
+    const q = path[i - 1];
+    if (p.x === q.x || p.y === q.y) return true;
+    const end = i === 1 || i === path.length - 1;
+    return end && Math.abs(p.x - q.x) === Math.abs(p.y - q.y);
+  });
 }
 
-/** True if the path's first segment heads out along `dir` (any if unknown). */
+/** True if the path's first segment heads out along `dir` (any if unknown).
+ *  For a diagonal `dir`, heading along either of its components counts. */
 function leaves(path: Pt[], dir?: Pt): boolean {
   if (!dir || path.length < 2) return true;
   const dx = Math.sign(path[1].x - path[0].x);
   const dy = Math.sign(path[1].y - path[0].y);
-  return dx === dir.x && dy === dir.y;
+  if (dx === dir.x && dy === dir.y) return true;
+  if (dir.x !== 0 && dir.y !== 0) {
+    return (dx === dir.x && dy === 0) || (dx === 0 && dy === dir.y);
+  }
+  return false;
 }

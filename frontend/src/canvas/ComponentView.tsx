@@ -1,7 +1,7 @@
 import { useMemo } from "react";
 import type { ComponentInstance, PinRef } from "../types/circuit";
 import { getDef } from "../domain/componentDefs";
-import { GRID_SIZE } from "../utils/geometry";
+import { GRID_SIZE, axisScale, transformLocal } from "../utils/geometry";
 import { SYMBOLS } from "./symbols";
 import { formatSIValue } from "../utils/units";
 
@@ -33,7 +33,8 @@ export function ComponentView({
 
   const cx = component.x * GRID_SIZE;
   const cy = component.y * GRID_SIZE;
-  const scaleX = component.mirrored ? -1 : 1;
+  // A diagonal part's pins are √2 apart farther; stretch the artwork to reach them.
+  const scaleX = (component.mirrored ? -1 : 1) * axisScale(component.rotation);
 
   const stroke = selected ? "var(--amber)" : "var(--text-primary)";
 
@@ -69,14 +70,13 @@ export function ComponentView({
         <Symbol stroke={stroke} />
       </g>
 
-      {/* Pins: drawn in a separate, un-mirrored-but-rotated group so pin
-          hit targets always sit exactly on the wire endpoints computed
-          by resolvePinWorld (mirroring only affects the artwork, not
-          electrical topology). */}
-      <g transform={`rotate(${component.rotation})`}>
+      {/* Pins: placed with the same transform as resolvePinWorld so pin
+          hit targets always sit exactly on the wire endpoints. */}
+      <g>
         {def.pins.map((pin) => {
-          const px = (component.mirrored ? -pin.local.x : pin.local.x) * GRID_SIZE;
-          const py = pin.local.y * GRID_SIZE;
+          const t = transformLocal(pin.local, component.rotation, component.mirrored);
+          const px = t.x * GRID_SIZE;
+          const py = t.y * GRID_SIZE;
           const connected = isPinConnected(pin.id);
           const isHovered = hoveredPin === pin.id;
           return (

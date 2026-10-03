@@ -21,7 +21,7 @@
  */
 
 import type { JsonNetlist, JsonComponentDetail } from "./loadNetlistJson";
-import { clusterValues, CLUSTER_TOLERANCE_PX } from "./loadNetlistJson";
+import { clusterValues, clusterTolerancePx } from "./loadNetlistJson";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -94,8 +94,9 @@ export function buildPinMap(netlist: JsonNetlist): Map<string, CjsPin> {
   const { sx, sy } = getScale(netlist);
 
   const details = netlist.component_details ?? [];
-  const xCluster = clusterValues(details.flatMap((d) => d.pins.map((p) => p.x)), CLUSTER_TOLERANCE_PX);
-  const yCluster = clusterValues(details.flatMap((d) => d.pins.map((p) => p.y)), CLUSTER_TOLERANCE_PX);
+  const tolerance = clusterTolerancePx(details);
+  const xCluster = clusterValues(details.flatMap((d) => d.pins.map((p) => p.x)), tolerance);
+  const yCluster = clusterValues(details.flatMap((d) => d.pins.map((p) => p.y)), tolerance);
 
   for (const comp of details) {
     for (const pin of comp.pins) {
