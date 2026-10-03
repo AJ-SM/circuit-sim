@@ -1,0 +1,73 @@
+{
+  "netlist": {
+    "version": 1,
+    "components": [
+      {
+        "id": "e29ba688-2341-4594-94ab-9a6b4da74175",
+        "ref": "R1",
+        "type": "resistor",
+        "nodes": [
+          "1",
+          "2"
+        ],
+        "params": {
+          "resistance": 1000
+        }
+      },
+      {
+        "id": "e684fea4-e15e-495b-bc89-4f630007b865",
+        "ref": "C1",
+        "type": "capacitor",
+        "nodes": [
+          "3",
+          "4"
+        ],
+        "params": {
+          "capacitance": 0.000001
+        }
+      },
+      {
+        "id": "187b7d7a-983f-472a-ac5d-a0da63018e8e",
+        "ref": "L1",
+        "type": "inductor",
+        "nodes": [
+          "2",
+          "3"
+        ],
+        "params": {
+          "inductance": 0.001
+        }
+      },
+      {
+        "id": "d0aa8a97-15a7-4b36-86f9-8c62860782ea",
+        "ref": "V1",
+        "type": "vsource_dc",
+        "nodes": [
+          "1",
+          "4"
+        ],
+        "params": {
+          "voltage": 5
+        }
+      }
+    ],
+    "nets": [
+      "1",
+      "2",
+      "3",
+      "4"
+    ]
+  },
+  "analysis": {
+    "mode": "tran",
+    "tran": {
+      "stepSeconds": 0.000001,
+      "stopSeconds": 0.001
+    },
+    "ac": {
+      "startHz": 1,
+      "stopHz": 1000000,
+      "pointsPerDecade": 20
+    }
+  }
+}
