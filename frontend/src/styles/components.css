@@ -572,3 +572,131 @@
   opacity: 0.45;
   cursor: not-allowed;
 }
+
+/* --- Branch Analysis & Annotations --- */
+.component-badge {
+  font-family: var(--font-mono, monospace);
+  font-size: 10px;
+  font-weight: 600;
+  user-select: none;
+  pointer-events: none;
+}
+.component-badge-bg {
+  fill: rgba(15, 23, 42, 0.92);
+  stroke: rgba(56, 189, 248, 0.45);
+  stroke-width: 1;
+  rx: 4;
+}
+.component-badge-text-v { fill: #38bdf8; }
+.component-badge-text-i { fill: #4ade80; }
+
+/* Animated Wire Current Flow */
+@keyframes wireFlowAnim {
+  from { stroke-dashoffset: 20; }
+  to   { stroke-dashoffset: 0;  }
+}
+@keyframes wireFlowReverseAnim {
+  from { stroke-dashoffset: 0;  }
+  to   { stroke-dashoffset: 20; }
+}
+.wire-flow-forward  { animation: wireFlowAnim        var(--flow-speed, 0.8s) linear infinite; }
+.wire-flow-reverse  { animation: wireFlowReverseAnim var(--flow-speed, 0.8s) linear infinite; }
+
+/* Branch Analysis Table */
+.branch-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+.branch-table th,
+.branch-table td {
+  padding: 5px 7px;
+  text-align: left;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  vertical-align: middle;
+}
+.branch-table th {
+  color: #64748b;
+  font-weight: 700;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  background: rgba(8, 12, 20, 0.75);
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+.branch-table tr:last-child td { border-bottom: none; }
+.branch-table tr:hover td { background: rgba(255,255,255,0.02); }
+.branch-table .val-v   { color: #38bdf8; font-family: var(--font-mono); }
+.branch-table .val-i   { color: #4ade80; font-family: var(--font-mono); }
+.branch-table .val-dir { color: #fbbf24; font-weight: 500; }
+
+/* Scrollable table wrapper */
+.branch-scroll {
+  max-height: 280px;
+  overflow-y: auto;
+  border: 1px solid rgba(255,255,255,0.07);
+  border-radius: 5px;
+  background: rgba(8,12,20,0.65);
+}
+.branch-scroll::-webkit-scrollbar { width: 4px; }
+.branch-scroll::-webkit-scrollbar-track { background: transparent; }
+.branch-scroll::-webkit-scrollbar-thumb {
+  background: rgba(255,255,255,0.15);
+  border-radius: 2px;
+}
+
+/* ── Simulation result sections ───────────────────────────────────── */
+.sim-section { display: flex; flex-direction: column; gap: 6px; }
+
+.sim-section-title {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #64748b;
+  padding-bottom: 3px;
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+}
+
+/* Node voltage summary grid */
+.node-voltage-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(76px, 1fr));
+  gap: 5px;
+}
+
+.node-voltage-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  background: rgba(8,12,20,0.7);
+  border: 1px solid rgba(255,255,255,0.07);
+  border-radius: 4px;
+  padding: 5px 4px;
+}
+
+.node-id {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  color: #64748b;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.node-v {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.1;
+}
+
+/* Analysis SVG overlay text */
+.analysis-overlay text {
+  user-select: none;
+  pointer-events: none;
+}
+

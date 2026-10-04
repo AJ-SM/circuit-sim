@@ -1,11 +1,14 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useCircuitStore } from "../store/circuitStore";
 import { getDef } from "../domain/componentDefs";
+import { buildNetlist } from "../domain/netlist";
 import { GRID_SIZE, pinDirection, resolvePinWorld, snap } from "../utils/geometry";
 import { useCanvasView } from "./useCanvasView";
 import { ComponentView } from "./ComponentView";
 import { WireView } from "./WireView";
+import { AnalysisOverlay, buildNodeLabels } from "./AnalysisOverlay";
 import type { ComponentKind, PinRef } from "../types/circuit";
+import type { BranchInfo } from "../api/simulate";
 
 const DOT = 1.5;
 
@@ -15,6 +18,8 @@ export function SchematicCanvas() {
     useCanvasView(svgRef);
 
   const components = useCircuitStore((s) => s.components);
+  const simResult = useCircuitStore((s) => s.simResult);
+  const simStatus = useCircuitStore((s) => s.simStatus);
   const wires = useCircuitStore((s) => s.wires);
   const rawWireSegments = useCircuitStore((s) => s.rawWireSegments);
   const rawJunctions = useCircuitStore((s) => s.rawJunctions);
@@ -38,11 +43,9 @@ export function SchematicCanvas() {
   const dragging = useRef<{ id: string; offsetX: number; offsetY: number } | null>(null);
   const wireDrag = useRef<{ id: string; axis: "x" | "y" } | null>(null);
   const panning = useRef(false);
-  // Set to true by a pin's onPointerUp handler so the SVG-level onPointerUp
-  // knows NOT to cancel an in-progress wire (the pin already finished it).
   const wireFinalizedByPin = useRef(false);
 
-  // --- keyboard shortcuts: delete / rotate (R 90°, Shift+R 45°) / mirror the selection ---
+  // --- keyboard shortcuts ---
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (e.key === "Delete" || e.key === "Backspace") {
@@ -61,7 +64,7 @@ export function SchematicCanvas() {
     return () => window.removeEventListener("keydown", onKey);
   }, [selection, deleteSelected, rotateComponent, mirrorComponent, cancelWire, select]);
 
-  // --- drop a new component from the palette ---
+  // --- drop from palette ---
   const onDrop = useCallback(
     (e: React.DragEvent) => {
       e.preventDefault();
@@ -73,7 +76,7 @@ export function SchematicCanvas() {
     [screenToGrid, addComponent]
   );
 
-  // --- background: pan on drag, deselect on click ---
+  // --- pan / deselect ---
   const onBackgroundPointerDown = useCallback(
     (e: React.PointerEvent) => {
       if (e.button === 2 || e.button === 1) {
@@ -88,10 +91,7 @@ export function SchematicCanvas() {
 
   const onSvgPointerMove = useCallback(
     (e: React.PointerEvent) => {
-      if (panning.current) {
-        updatePan(e.clientX, e.clientY);
-        return;
-      }
+      if (panning.current) { updatePan(e.clientX, e.clientY); return; }
       if (wireDrag.current) {
         const { x, y } = screenToGrid(e.clientX, e.clientY);
         const { id, axis } = wireDrag.current;
@@ -118,23 +118,19 @@ export function SchematicCanvas() {
     wireDrag.current = null;
     if (pendingWire) {
       if (wireFinalizedByPin.current) {
-        // A pin's onPointerUp already called finishWire — don't cancel.
         wireFinalizedByPin.current = false;
       } else {
-        // Released over empty space: cancel the wire.
         cancelWire();
       }
     }
   }, [endPan, pendingWire, cancelWire]);
 
   const onWheel = useCallback(
-    (e: React.WheelEvent) => {
-      zoomAt(e.clientX, e.clientY, e.deltaY);
-    },
+    (e: React.WheelEvent) => { zoomAt(e.clientX, e.clientY, e.deltaY); },
     [zoomAt]
   );
 
-  // --- component body drag-to-move ---
+  // --- component drag-to-move ---
   const startBodyDrag = useCallback(
     (componentId: string) => (e: React.PointerEvent) => {
       e.stopPropagation();
@@ -147,18 +143,15 @@ export function SchematicCanvas() {
     [components, screenToGrid, select]
   );
 
-  // --- pin drag-to-wire ---
+  // --- pin wire ---
   const onPinPointerDown = useCallback(
     (pin: PinRef, e: React.PointerEvent) => {
       if (pendingWire) {
-        // Second click on a destination pin while already drawing a wire:
-        // finish the wire on pointer-down (click mode).
         e.stopPropagation();
         wireFinalizedByPin.current = true;
         finishWire(pin);
         return;
       }
-      // Start a new wire from this pin.
       const { x, y } = screenToGrid(e.clientX, e.clientY);
       startWire(pin, { x: snap(x), y: snap(y) });
     },
@@ -167,7 +160,7 @@ export function SchematicCanvas() {
 
   const onPinPointerUp = useCallback(
     (pin: PinRef) => (e: React.PointerEvent) => {
-      if (!pendingWire) return; // no wire in progress — ignore
+      if (!pendingWire) return;
       e.stopPropagation();
       wireFinalizedByPin.current = true;
       finishWire(pin);
@@ -175,6 +168,7 @@ export function SchematicCanvas() {
     [pendingWire, finishWire]
   );
 
+  // --- helpers: pin world position ---
   const componentPinWorld = (componentId: string, pinId: string) => {
     const comp = components.find((c) => c.id === componentId);
     if (!comp) return { x: 0, y: 0 };
@@ -195,6 +189,136 @@ export function SchematicCanvas() {
         (w.from.componentId === componentId && w.from.pinId === pinId) ||
         (w.to.componentId === componentId && w.to.pinId === pinId)
     );
+
+  // ── Simulation analysis maps ──────────────────────────────────────────────
+
+  /** branch_analysis keyed by component UUID (not refId) */
+  const branchMap = useMemo(() => {
+    const m = new Map<string, BranchInfo>();
+    if (simResult?.branch_analysis) {
+      for (const b of simResult.branch_analysis) {
+        m.set(b.component_id, b);
+      }
+    }
+    return m;
+  }, [simResult]);
+
+  /**
+   * Build netlist-level connectivity: pinKey → netName
+   * (same union-find as buildNetlist, but we just need the final mapping).
+   */
+  const pinNetMap = useMemo(() => {
+    const netlist = buildNetlist(components, wires);
+    const map = new Map<string, string>(); // "compId:pinId" → netName
+    for (const nc of netlist.components) {
+      const def = getDef(components.find((c) => c.id === nc.id)!.kind);
+      def.pins.forEach((pin, idx) => {
+        map.set(`${nc.id}:${pin.id}`, nc.nodes[idx]);
+      });
+    }
+    // ground components map to "0"
+    for (const c of components) {
+      if (c.kind === "ground") {
+        map.set(`${c.id}:p1`, "0");
+      }
+    }
+    return map;
+  }, [components, wires]);
+
+  /** nodeId → voltage (from branch_analysis) */
+  const nodeVoltageMap = useMemo(() => {
+    const m = new Map<string, number>();
+    if (simResult?.branch_analysis) {
+      for (const b of simResult.branch_analysis) {
+        m.set(b.node_a, b.voltage_a);
+        m.set(b.node_b, b.voltage_b);
+      }
+    }
+    return m;
+  }, [simResult]);
+
+  /** Maximum absolute voltage across all nodes, for color scale */
+  const maxVoltage = useMemo(() => {
+    return Array.from(nodeVoltageMap.values()).reduce(
+      (max, v) => Math.max(max, Math.abs(v)),
+      0
+    );
+  }, [nodeVoltageMap]);
+
+  /**
+   * Per-wire: { currentAmperes, currentDirection, avgVoltage }
+   * A wire is associated with the component whose branch-analysis it
+   * participates in (from-pin side, component lookup).
+   */
+  const wireAnalysis = useMemo(() => {
+    type WireInfo = {
+      currentAmperes?: number;
+      currentDirection?: "a_to_b" | "b_to_a" | "none";
+      avgVoltage?: number;
+    };
+    const result = new Map<string, WireInfo>();
+
+    for (const w of wires) {
+      const fromNet = pinNetMap.get(`${w.from.componentId}:${w.from.pinId}`);
+      const toNet = pinNetMap.get(`${w.to.componentId}:${w.to.pinId}`);
+      const va = fromNet !== undefined ? nodeVoltageMap.get(fromNet) : undefined;
+      const vb = toNet !== undefined ? nodeVoltageMap.get(toNet) : undefined;
+      const avgV = va !== undefined && vb !== undefined ? (va + vb) / 2 : va ?? vb;
+
+      // Find branch info: look at components connected to both ends, pick the
+      // one that has both pins on this wire's nets.
+      let current: number | undefined;
+      let direction: "a_to_b" | "b_to_a" | "none" | undefined;
+
+      // Try from-component first
+      const fromBranch = branchMap.get(w.from.componentId);
+      const toBranch = branchMap.get(w.to.componentId);
+      const chosen = fromBranch ?? toBranch;
+      if (chosen) {
+        current = chosen.current_a;
+        // Direction relative to wire: if branch direction is a_to_b and the
+        // from-pin is node_a, then current flows from→to.
+        const fromIsA =
+          fromBranch &&
+          fromNet !== undefined &&
+          fromBranch.node_a === fromNet;
+        if (fromIsA) {
+          direction = chosen.direction;
+        } else {
+          // flip
+          direction =
+            chosen.direction === "a_to_b"
+              ? "b_to_a"
+              : chosen.direction === "b_to_a"
+              ? "a_to_b"
+              : "none";
+        }
+      }
+
+      result.set(w.id, {
+        currentAmperes: current,
+        currentDirection: direction,
+        avgVoltage: avgV,
+      });
+    }
+    return result;
+  }, [wires, pinNetMap, nodeVoltageMap, branchMap]);
+
+  /** Node voltage labels: collect all pin positions with known voltages */
+  const nodeLabels = useMemo(() => {
+    if (!simResult?.branch_analysis) return [];
+    const pinPositions = components.flatMap((c) => {
+      const def = getDef(c.kind);
+      return def.pins.map((pin) => {
+        const world = resolvePinWorld(c, pin);
+        const nodeId = pinNetMap.get(`${c.id}:${pin.id}`) ?? "";
+        return { componentId: c.id, pinId: pin.id, nodeId, x: world.x, y: world.y };
+      });
+    });
+    return buildNodeLabels(simResult.branch_analysis, pinPositions);
+  }, [simResult, components, pinNetMap]);
+
+  const analysisActive = simStatus === "done" && !!simResult?.branch_analysis;
 
   return (
     <svg
@@ -219,7 +343,7 @@ export function SchematicCanvas() {
       <g transform={`translate(${view.panX}, ${view.panY}) scale(${view.zoom})`}>
         <rect x={-4000} y={-4000} width={8000} height={8000} fill="url(#grid-dots)" />
 
-        {/* ── Raw wire segments from loaded netlist JSON (pixel geometry) ──────── */}
+        {/* ── Raw wire segments from loaded netlist JSON ─── */}
         {rawWireSegments.length > 0 && (
           <g
             className="raw-wires-layer"
@@ -250,26 +374,34 @@ export function SchematicCanvas() {
           </g>
         )}
 
-        {wires.map((w) => (
-          <WireView
-            key={w.id}
-            points={[
-              componentPinWorld(w.from.componentId, w.from.pinId),
-              componentPinWorld(w.to.componentId, w.to.pinId),
-            ]}
-            dirs={[
-              componentPinDir(w.from.componentId, w.from.pinId),
-              componentPinDir(w.to.componentId, w.to.pinId),
-            ]}
-            selected={selection?.type === "wire" && selection.id === w.id}
-            route={w.route}
-            onPointerDown={(e, axis) => {
-              e.stopPropagation();
-              select({ type: "wire", id: w.id });
-              if (axis && e.button === 0) wireDrag.current = { id: w.id, axis };
-            }}
-          />
-        ))}
+        {/* ── Wires with analysis overlay ─── */}
+        {wires.map((w) => {
+          const analysis = wireAnalysis.get(w.id);
+          return (
+            <WireView
+              key={w.id}
+              points={[
+                componentPinWorld(w.from.componentId, w.from.pinId),
+                componentPinWorld(w.to.componentId, w.to.pinId),
+              ]}
+              dirs={[
+                componentPinDir(w.from.componentId, w.from.pinId),
+                componentPinDir(w.to.componentId, w.to.pinId),
+              ]}
+              selected={selection?.type === "wire" && selection.id === w.id}
+              route={w.route}
+              onPointerDown={(e, axis) => {
+                e.stopPropagation();
+                select({ type: "wire", id: w.id });
+                if (axis && e.button === 0) wireDrag.current = { id: w.id, axis };
+              }}
+              currentAmperes={analysisActive ? analysis?.currentAmperes : undefined}
+              currentDirection={analysisActive ? analysis?.currentDirection : undefined}
+              avgVoltage={analysisActive ? analysis?.avgVoltage : undefined}
+              maxVoltage={analysisActive ? maxVoltage : undefined}
+            />
+          );
+        })}
 
         {pendingWire && (
           <WireView
@@ -284,6 +416,7 @@ export function SchematicCanvas() {
           <ComponentView
             key={c.id}
             component={c}
+            branchInfo={analysisActive ? branchMap.get(c.id) : undefined}
             selected={selection?.type === "component" && selection.id === c.id}
             hoveredPin={hoveredPin?.componentId === c.id ? hoveredPin.pinId : null}
             onPointerDownBody={startBodyDrag(c.id)}
@@ -294,6 +427,11 @@ export function SchematicCanvas() {
             isPinConnected={(pinId) => isPinConnected(c.id, pinId)}
           />
         ))}
+
+        {/* ── Node voltage labels ─── */}
+        {analysisActive && (
+          <AnalysisOverlay nodeLabels={nodeLabels} maxVoltage={maxVoltage} />
+        )}
       </g>
     </svg>
   );

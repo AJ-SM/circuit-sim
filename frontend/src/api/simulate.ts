@@ -1,8 +1,6 @@
-import type { Netlist } from "../domain/netlist";
+﻿import type { Netlist } from "../domain/netlist";
 import type { SimulationConfig } from "../domain/simulationConfig";
 
-/** Change this once the Python backend exists, or set VITE_SIMULATE_URL
- *  in a .env file to override it without touching code. */
 export const SIMULATE_ENDPOINT =
   import.meta.env.VITE_SIMULATE_URL ?? "http://localhost:8000/simulate";
 
@@ -11,13 +9,27 @@ export interface SimulateRequest {
   analysis: SimulationConfig;
 }
 
-/** Shape the backend is expected to return. Adjust when the real backend
- *  lands; nothing else in the UI needs to change if this stays close. */
+/** Per-component branch analysis result from the backend. */
+export interface BranchInfo {
+  component_id: string;
+  ref: string;
+  type: string;
+  node_a: string;
+  node_b: string;
+  voltage_a: number;
+  voltage_b: number;
+  delta_v: number;
+  current_a: number;
+  direction: "a_to_b" | "b_to_a" | "none";
+}
+
 export interface SimulationResult {
   ok: boolean;
   message?: string;
   /** e.g. { "time": [...], "V(1)": [...], "I(R1)": [...] } */
   traces?: Record<string, number[]>;
+  /** NEW: per-component voltage, current, and direction — added alongside traces */
+  branch_analysis?: BranchInfo[];
 }
 
 export async function runSimulation(
