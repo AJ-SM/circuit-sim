@@ -12,6 +12,7 @@ interface Props {
   currentDirection?: "a_to_b" | "b_to_a" | "none";
   avgVoltage?: number;
   maxVoltage?: number;
+  showCurrentLabel?: boolean;
 }
 
 /** Format amps compactly: 0.005 → "5.0mA" */
@@ -25,15 +26,28 @@ function fmtAmps(a: number): string {
   return `${a.toExponential(1)} A`;
 }
 
+/**
+ * Map a node's actual potential to a color using standard EE conventions:
+ *   0 V (GND)  → cool cyan/blue  (#38bdf8)
+ *   mid range  → phosphor green  (#6effb0)
+ *   high +V    → warm amber/red  (#ffb454 → #f87171)
+ * `v` is the signed voltage; `maxV` is the max absolute voltage in the circuit.
+ */
 function voltageColor(v: number, maxV: number): string {
   if (maxV === 0) return "var(--phosphor)";
-  const t = Math.min(1, Math.abs(v) / maxV);
-  if (t < 0.5) {
-    const s = t / 0.5;
+  // Normalize 0..1 where 0 = ground potential, 1 = highest node
+  const t = Math.min(1, Math.max(0, v / maxV));
+  if (t < 0.15) {
+    // Near ground: cyan/blue
+    return "#38bdf8";
+  } else if (t < 0.5) {
+    // Low-mid: cyan → green
+    const s = (t - 0.15) / 0.35;
     return `rgb(${Math.round(56 + s * 54)},${Math.round(189 + s * 66)},${Math.round(248 - s * 72)})`;
   } else {
+    // Mid-high: green → amber → red
     const s = (t - 0.5) / 0.5;
-    return `rgb(${Math.round(110 + s * 145)},${Math.round(255 - s * 75)},${Math.round(176 - s * 92)})`;
+    return `rgb(${Math.round(110 + s * 145)},${Math.round(255 - s * 138)},${Math.round(176 - s * 163)})`;
   }
 }
 
@@ -49,6 +63,7 @@ function flowSpeed(amps: number): string {
 export function WireView({
   points, dirs, selected, route, onPointerDown,
   currentAmperes, currentDirection, avgVoltage, maxVoltage,
+  showCurrentLabel = false,
 }: Props) {
   if (points.length < 2) return null;
   const [a, b] = points;
@@ -58,13 +73,30 @@ export function WireView({
   const routed = grid.map((p) => ({ x: p.x * GRID_SIZE, y: p.y * GRID_SIZE }));
   const d = routed.map((p, i) => `${i === 0 ? "M" : "L"} ${p.x} ${p.y}`).join(" ");
 
-  // Midpoint + direction angle
-  const midIdx = Math.floor(routed.length / 2);
-  const midA = routed[midIdx - 1] ?? routed[0];
-  const midB = routed[midIdx] ?? routed[routed.length - 1];
-  const midX = (midA.x + midB.x) / 2;
-  const midY = (midA.y + midB.y) / 2;
-  const angle = Math.atan2(midB.y - midA.y, midB.x - midA.x) * (180 / Math.PI);
+  // Find the longest segment in the routed path to place the arrowhead & badge.
+  // This guarantees placing on the open wire stretch rather than near pins/junctions.
+  let bestMidX = (routed[0].x + routed[routed.length - 1].x) / 2;
+  let bestMidY = (routed[0].y + routed[routed.length - 1].y) / 2;
+  let bestAngle = 0;
+  let maxSegLen = -1;
+
+  for (let i = 0; i < routed.length - 1; i++) {
+    const p1 = routed[i];
+    const p2 = routed[i + 1];
+    const dx = p2.x - p1.x;
+    const dy = p2.y - p1.y;
+    const len = Math.hypot(dx, dy);
+    if (len > maxSegLen) {
+      maxSegLen = len;
+      bestMidX = (p1.x + p2.x) / 2;
+      bestMidY = (p1.y + p2.y) / 2;
+      bestAngle = Math.atan2(dy, dx) * (180 / Math.PI);
+    }
+  }
+
+  const midX = bestMidX;
+  const midY = bestMidY;
+  const angle = bestAngle;
 
   const hasFlow = currentAmperes !== undefined && Math.abs(currentAmperes) > 1e-15;
   const isReverse = currentDirection === "b_to_a";
@@ -81,13 +113,28 @@ export function WireView({
   const flowClass = hasFlow ? (isReverse ? "wire-flow-reverse" : "wire-flow-forward") : "";
   const speed = hasFlow ? flowSpeed(currentAmperes!) : "1s";
 
-  // Current label text
-  const currentLabel = hasFlow ? fmtAmps(currentAmperes!) : null;
-  const labelW = currentLabel ? currentLabel.length * 5.8 + 10 : 0;
+  // Current label: always show absolute magnitude — direction is shown by the arrow
+  const currentLabel = hasFlow ? fmtAmps(Math.abs(currentAmperes!)) : null;
+  const labelW = currentLabel ? Math.max(36, currentLabel.length * 6.2 + 10) : 0;
 
-  // Determine label offset direction (perpendicular to wire)
-  const labelOffsetX = Math.sin((angle * Math.PI) / 180) * 18;
-  const labelOffsetY = -Math.cos((angle * Math.PI) / 180) * 18;
+  // Determine label offset direction (strictly adjacent with clean clearance)
+  const rad = (angle * Math.PI) / 180;
+  const isHorizontal = Math.abs(Math.sin(rad)) < 0.2;
+  const isVertical = Math.abs(Math.cos(rad)) < 0.2;
+
+  let labelOffsetX = 0;
+  let labelOffsetY = -16;
+
+  if (isHorizontal) {
+    labelOffsetX = 0;
+    labelOffsetY = -16; // 16px strictly above the horizontal line
+  } else if (isVertical) {
+    labelOffsetX = 18;  // 18px strictly to the side of the vertical line
+    labelOffsetY = 0;
+  } else {
+    labelOffsetX = Math.sin(rad) * 18;
+    labelOffsetY = -Math.cos(rad) * 18;
+  }
 
   return (
     <g>
@@ -145,8 +192,8 @@ export function WireView({
         </g>
       )}
 
-      {/* current magnitude label near the arrow */}
-      {hasFlow && currentLabel && (
+      {/* current magnitude label near the arrow (shown on select or when toggled) */}
+      {hasFlow && currentLabel && (selected || showCurrentLabel) && (
         <g
           transform={`translate(${midX + labelOffsetX}, ${midY + labelOffsetY})`}
           pointerEvents="none"

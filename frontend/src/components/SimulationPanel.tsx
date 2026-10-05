@@ -18,10 +18,9 @@ function fmtAmps(a: number): string {
 
 function fmtVolts(v: number): string {
   const abs = Math.abs(v);
-  if (abs === 0) return "0 V";
-  if (abs >= 1) return `${v.toFixed(4)} V`;
-  if (abs >= 1e-3) return `${(v * 1e3).toFixed(2)} mV`;
-  return `${v.toExponential(2)} V`;
+  if (abs < 0.001) return "0.00 V";
+  if (abs >= 1) return `${v.toFixed(3)} V`;
+  return `${(v * 1e3).toFixed(1)} mV`;
 }
 
 /** Current magnitude → color intensity for the current cell */
@@ -62,6 +61,10 @@ export function SimulationPanel() {
   const simResult = useCircuitStore((s) => s.simResult);
   const simError = useCircuitStore((s) => s.simError);
   const runSimulate = useCircuitStore((s) => s.runSimulate);
+  const showAllBadges = useCircuitStore((s) => s.showAllBadges);
+  const setShowAllBadges = useCircuitStore((s) => s.setShowAllBadges);
+  const toggleComponentBadge = useCircuitStore((s) => s.toggleComponentBadge);
+  const select = useCircuitStore((s) => s.select);
 
   const [showPayload, setShowPayload] = useState(false);
 
@@ -77,8 +80,9 @@ export function SimulationPanel() {
     [branches]
   );
 
+  // Max signed voltage — GND is 0, so scale from 0 → highest +V node
   const maxVoltage = useMemo(
-    () => branches.reduce((m, b) => Math.max(m, Math.abs(b.voltage_a), Math.abs(b.voltage_b)), 0),
+    () => branches.reduce((m, b) => Math.max(m, b.voltage_a, b.voltage_b), 0),
     [branches]
   );
 
@@ -86,9 +90,10 @@ export function SimulationPanel() {
   const nodeVoltages = useMemo(() => {
     const map = new Map<string, number>();
     for (const b of branches) {
-      map.set(b.node_a, b.voltage_a);
-      map.set(b.node_b, b.voltage_b);
+      map.set(b.node_a, Math.abs(b.voltage_a) < 0.001 ? 0 : b.voltage_a);
+      map.set(b.node_b, Math.abs(b.voltage_b) < 0.001 ? 0 : b.voltage_b);
     }
+    map.set("0", 0);
     return Array.from(map.entries()).sort((a, b) =>
       a[0] === "0" ? -1 : b[0] === "0" ? 1 : a[0].localeCompare(b[0])
     );
@@ -198,9 +203,33 @@ export function SimulationPanel() {
       {simStatus === "error" && <div className="result-box result-error">{simError}</div>}
 
       {simStatus === "done" && simResult && (
-        <div className="result-box result-ok" style={{ fontSize: 11, padding: "6px 10px" }}>
-          {simResult.message ?? "✓ Simulation complete"}
-        </div>
+        <>
+          <div className="result-box result-ok" style={{ fontSize: 11, padding: "6px 10px" }}>
+            {simResult.message ?? "✓ Simulation complete"}
+          </div>
+          <div style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            margin: "8px 0 4px",
+            padding: "4px 8px",
+            background: "rgba(255,255,255,0.03)",
+            borderRadius: 4,
+            border: "1px solid rgba(255,255,255,0.06)",
+          }}>
+            <span style={{ fontSize: 10, color: "var(--text-dim)" }}>
+              {showAllBadges ? "All labels visible" : "Click components to inspect"}
+            </span>
+            <button
+              className="btn btn-xs"
+              onClick={() => setShowAllBadges(!showAllBadges)}
+              style={{ fontSize: 10, padding: "2px 8px" }}
+              title="Toggle showing measurements on all components at once"
+            >
+              {showAllBadges ? "Hide Values" : "Show All Values"}
+            </button>
+          </div>
+        </>
       )}
 
       {/* ── Node Voltages Summary ── */}
@@ -214,11 +243,15 @@ export function SimulationPanel() {
                 <span
                   className="node-v"
                   style={{
-                    color: node === "0"
-                      ? "#38bdf8"
-                      : maxVoltage > 0
-                      ? `rgb(${Math.round(110 * Math.abs(v) / maxVoltage + 56 * (1 - Math.abs(v) / maxVoltage))},${Math.round(255)},${Math.round(176 * (1 - Math.abs(v) / maxVoltage) + 248 * Math.abs(v) / maxVoltage)})`
-                      : "#6effb0",
+                    // EE color convention: blue=GND, green=mid, amber/red=high potential
+                    color: (() => {
+                      if (node === "0" || (maxVoltage > 0 && v / maxVoltage < 0.08)) return "#38bdf8";
+                      if (maxVoltage === 0) return "#6effb0";
+                      const t = Math.min(1, Math.max(0, v / maxVoltage));
+                      if (t < 0.5)  return "#6effb0";
+                      if (t < 0.85) return "#ffb454";
+                      return "#f87171";
+                    })(),
                   }}
                 >
                   {fmtVolts(v)}
@@ -253,7 +286,15 @@ export function SimulationPanel() {
                       : "transparent";
 
                   return (
-                    <tr key={b.component_id} style={{ background: rowHighlight }}>
+                    <tr
+                      key={b.component_id}
+                      style={{ background: rowHighlight, cursor: "pointer" }}
+                      onClick={() => {
+                        select({ type: "component", id: b.component_id });
+                        toggleComponentBadge(b.component_id);
+                      }}
+                      title="Click to toggle measurements on canvas"
+                    >
                       <td>
                         <span style={{ fontWeight: 700, color: "#f1f5f9", fontFamily: "var(--font-mono)", fontSize: 11 }}>
                           {b.ref}

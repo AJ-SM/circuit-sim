@@ -20,6 +20,9 @@ export function SchematicCanvas() {
   const components = useCircuitStore((s) => s.components);
   const simResult = useCircuitStore((s) => s.simResult);
   const simStatus = useCircuitStore((s) => s.simStatus);
+  const toggledBadgeIds = useCircuitStore((s) => s.toggledBadgeIds);
+  const showAllBadges = useCircuitStore((s) => s.showAllBadges);
+  const toggleComponentBadge = useCircuitStore((s) => s.toggleComponentBadge);
   const wires = useCircuitStore((s) => s.wires);
   const rawWireSegments = useCircuitStore((s) => s.rawWireSegments);
   const rawJunctions = useCircuitStore((s) => s.rawJunctions);
@@ -41,6 +44,8 @@ export function SchematicCanvas() {
     null
   );
   const dragging = useRef<{ id: string; offsetX: number; offsetY: number } | null>(null);
+  const isDraggingComponent = useRef(false);
+  const dragStartPos = useRef<{ x: number; y: number } | null>(null);
   const wireDrag = useRef<{ id: string; axis: "x" | "y" } | null>(null);
   const panning = useRef(false);
   const wireFinalizedByPin = useRef(false);
@@ -99,6 +104,12 @@ export function SchematicCanvas() {
         return;
       }
       if (dragging.current) {
+        if (dragStartPos.current) {
+          const dist = Math.hypot(e.clientX - dragStartPos.current.x, e.clientY - dragStartPos.current.y);
+          if (dist > 4) {
+            isDraggingComponent.current = true;
+          }
+        }
         const { x, y } = screenToGrid(e.clientX, e.clientY);
         moveComponent(dragging.current.id, x - dragging.current.offsetX, y - dragging.current.offsetY);
         return;
@@ -139,6 +150,8 @@ export function SchematicCanvas() {
       select({ type: "component", id: componentId });
       const { x, y } = screenToGrid(e.clientX, e.clientY);
       dragging.current = { id: componentId, offsetX: x - comp.x, offsetY: y - comp.y };
+      dragStartPos.current = { x: e.clientX, y: e.clientY };
+      isDraggingComponent.current = false;
     },
     [components, screenToGrid, select]
   );
@@ -237,10 +250,11 @@ export function SchematicCanvas() {
     return m;
   }, [simResult]);
 
-  /** Maximum absolute voltage across all nodes, for color scale */
+  /** Maximum signed node voltage — used as the top of the color scale.
+   *  Ground is 0 V, so we only care about the highest positive potential. */
   const maxVoltage = useMemo(() => {
     return Array.from(nodeVoltageMap.values()).reduce(
-      (max, v) => Math.max(max, Math.abs(v)),
+      (max, v) => Math.max(max, v),
       0
     );
   }, [nodeVoltageMap]);
@@ -296,7 +310,7 @@ export function SchematicCanvas() {
       }
 
       result.set(w.id, {
-        currentAmperes: current,
+        currentAmperes: current !== undefined ? Math.abs(current) : undefined,
         currentDirection: direction,
         avgVoltage: avgV,
       });
@@ -304,7 +318,7 @@ export function SchematicCanvas() {
     return result;
   }, [wires, pinNetMap, nodeVoltageMap, branchMap]);
 
-  /** Node voltage labels: collect all pin positions with known voltages */
+  /** Node voltage labels: collect all pin positions with known voltages and orientations */
   const nodeLabels = useMemo(() => {
     if (!simResult?.branch_analysis) return [];
     const pinPositions = components.flatMap((c) => {
@@ -312,13 +326,30 @@ export function SchematicCanvas() {
       return def.pins.map((pin) => {
         const world = resolvePinWorld(c, pin);
         const nodeId = pinNetMap.get(`${c.id}:${pin.id}`) ?? "";
-        return { componentId: c.id, pinId: pin.id, nodeId, x: world.x, y: world.y };
+        const dir = pinDirection(c, pin);
+        return {
+          componentId: c.id,
+          pinId: pin.id,
+          nodeId,
+          x: world.x,
+          y: world.y,
+          pinDir: dir,
+          compRotation: c.rotation,
+          isGround: c.kind === "ground" || nodeId === "0",
+        };
       });
     });
     return buildNodeLabels(simResult.branch_analysis, pinPositions);
   }, [simResult, components, pinNetMap]);
 
   const analysisActive = simStatus === "done" && !!simResult?.branch_analysis;
+
+  /** Memoised Set of component IDs whose badge is currently visible */
+  const badgeVisibleIds = useMemo(() => {
+    if (!analysisActive) return null;
+    if (showAllBadges) return new Set(components.map((c) => c.id));
+    return new Set(toggledBadgeIds);
+  }, [analysisActive, showAllBadges, toggledBadgeIds, components]);
 
   return (
     <svg
@@ -399,6 +430,13 @@ export function SchematicCanvas() {
               currentDirection={analysisActive ? analysis?.currentDirection : undefined}
               avgVoltage={analysisActive ? analysis?.avgVoltage : undefined}
               maxVoltage={analysisActive ? maxVoltage : undefined}
+              showCurrentLabel={
+                analysisActive &&
+                (
+                  (badgeVisibleIds?.has(w.from.componentId) ?? false) ||
+                  (badgeVisibleIds?.has(w.to.componentId) ?? false)
+                )
+              }
             />
           );
         })}
@@ -417,9 +455,18 @@ export function SchematicCanvas() {
             key={c.id}
             component={c}
             branchInfo={analysisActive ? branchMap.get(c.id) : undefined}
+            showBranchBadge={analysisActive && (badgeVisibleIds?.has(c.id) ?? false)}
+            onToggleBranchBadge={analysisActive ? () => toggleComponentBadge(c.id) : undefined}
             selected={selection?.type === "component" && selection.id === c.id}
             hoveredPin={hoveredPin?.componentId === c.id ? hoveredPin.pinId : null}
             onPointerDownBody={startBodyDrag(c.id)}
+            onClickBody={(e) => {
+              e.stopPropagation();
+              if (isDraggingComponent.current) return;
+              if (analysisActive && branchMap.has(c.id)) {
+                toggleComponentBadge(c.id);
+              }
+            }}
             onPinPointerDown={(pin, e) => onPinPointerDown(pin, e)}
             onPinPointerUp={(pin, e) => onPinPointerUp(pin)(e)}
             onPinPointerEnter={(pinId) => setHoveredPin({ componentId: c.id, pinId })}
@@ -428,9 +475,13 @@ export function SchematicCanvas() {
           />
         ))}
 
-        {/* ── Node voltage labels ─── */}
+        {/* ── Node voltage labels (shown only for toggled components) ─── */}
         {analysisActive && (
-          <AnalysisOverlay nodeLabels={nodeLabels} maxVoltage={maxVoltage} />
+          <AnalysisOverlay
+            nodeLabels={nodeLabels}
+            maxVoltage={maxVoltage}
+            visibleComponentIds={badgeVisibleIds}
+          />
         )}
       </g>
     </svg>

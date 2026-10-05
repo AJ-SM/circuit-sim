@@ -14,6 +14,7 @@ interface ToolbarProps {
 export function Toolbar({ viewMode, onViewModeChange, drawing, onDrawClick, onLoadImageClick }: ToolbarProps) {
   const clearAll = useCircuitStore((s) => s.clearAll);
   const loadNetlist = useCircuitStore((s) => s.loadNetlist);
+  const runSimulate = useCircuitStore((s) => s.runSimulate);
   const netlistRaw = useCircuitStore((s) => s.netlistRaw);
   const componentCount = useCircuitStore((s) => s.components.length);
   const wireCount = useCircuitStore((s) => s.wires.length);
@@ -52,6 +53,11 @@ export function Toolbar({ viewMode, onViewModeChange, drawing, onDrawClick, onLo
             `Netlist loaded.\n\nThe following components are not yet supported in the canvas and were skipped:\n  ${skipped.join(", ")}\n\n` +
             `Supported types: Resistor, Capacitor, Inductor, Voltage (DC/AC), Ground.`
           );
+        }
+
+        const currentComponents = useCircuitStore.getState().components;
+        if (currentComponents.some((c) => c.kind === "ground")) {
+          runSimulate().catch(() => {});
         }
       } catch {
         alert("Failed to parse netlist file. Make sure it is valid JSON.");

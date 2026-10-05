@@ -56,6 +56,11 @@ interface CircuitState {
   simError: string | null;
   simConfig: SimulationConfig;
   setSimConfig: (config: SimulationConfig) => void;
+  toggledBadgeIds: string[];
+  showAllBadges: boolean;
+  toggleComponentBadge: (id: string) => void;
+  setShowAllBadges: (show: boolean) => void;
+  clearToggledBadges: () => void;
 
   addComponent: (kind: ComponentKind, x: number, y: number) => void;
   moveComponent: (id: string, x: number, y: number) => void;
@@ -101,6 +106,19 @@ export const useCircuitStore = create<CircuitState>((set, get) => ({
   simError: null,
   simConfig: DEFAULT_SIM_CONFIG,
   setSimConfig: (config) => set({ simConfig: config }),
+  toggledBadgeIds: [],
+  showAllBadges: false,
+  toggleComponentBadge: (id: string) =>
+    set((s) => {
+      const exists = s.toggledBadgeIds.includes(id);
+      return {
+        toggledBadgeIds: exists
+          ? s.toggledBadgeIds.filter((x) => x !== id)
+          : [...s.toggledBadgeIds, id],
+      };
+    }),
+  setShowAllBadges: (show: boolean) => set({ showAllBadges: show }),
+  clearToggledBadges: () => set({ toggledBadgeIds: [] }),
 
   addComponent: (kind, x, y) => {
     const def = getDef(kind);
@@ -219,6 +237,8 @@ export const useCircuitStore = create<CircuitState>((set, get) => ({
       simStatus: "idle",
       simResult: null,
       simError: null,
+      toggledBadgeIds: [],
+      showAllBadges: false,
     })),
 
   loadNetlist: (json) => {
@@ -235,6 +255,8 @@ export const useCircuitStore = create<CircuitState>((set, get) => ({
       simStatus: "idle",
       simResult: null,
       simError: null,
+      toggledBadgeIds: [],
+      showAllBadges: false,
     }));
     return skipped;
   },

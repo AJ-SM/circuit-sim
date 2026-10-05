@@ -229,54 +229,81 @@ def _parse_op_output(raw: str) -> dict[str, float]:
     return results
 
 def _compute_branch_analysis(netlist: Netlist, op_values: dict[str, float]) -> list[dict]:
+    """
+    Compute per-component branch analysis using standard EE conventions:
+
+    1. Node voltages are relative to explicit ground (node "0" = 0 V).
+    2. Small numerical noise near zero is clamped to 0 V.
+    3. Passive Sign Convention: delta_v = V(node_a) - V(node_b) and
+       current is reported as a POSITIVE magnitude; direction arrow shows
+       actual flow (a→b when delta_v > 0 for passive components).
+    4. Voltage-source current from ngspice (v#branch) is the current INTO
+       the positive terminal. We negate it to get the conventional current
+       that EXITS the positive terminal (which is the physically meaningful
+       quantity students expect to see flowing around the loop).
+    """
+    _ZERO_SNAP = 1e-3  # 1 mV threshold: any |V| < 1mV is strictly snapped to 0.0 V
+
     node_voltage: dict[str, float] = {}
     for label, val in op_values.items():
         if label.startswith("V("):
-            node_voltage[label[2:-1].lower()] = val
-    node_voltage.setdefault("0", 0.0)
+            raw_node = label[2:-1].lower()
+            # Snap near-zero node voltages to exactly 0 V
+            node_voltage[raw_node] = 0.0 if abs(val) < _ZERO_SNAP else val
+    node_voltage["0"] = 0.0
+
     branches: list[dict] = []
     for comp in netlist.components:
         if len(comp.nodes) < 2:
             continue
         na = comp.nodes[0].lower()
         nb = comp.nodes[1].lower()
-        va = node_voltage.get(na, 0.0)
-        vb = node_voltage.get(nb, 0.0)
-        dv = va - vb
-        current = 0.0
+        va = 0.0 if na == "0" or abs(node_voltage.get(na, 0.0)) < _ZERO_SNAP else node_voltage.get(na, 0.0)
+        vb = 0.0 if nb == "0" or abs(node_voltage.get(nb, 0.0)) < _ZERO_SNAP else node_voltage.get(nb, 0.0)
+        dv = va - vb  # Passive sign convention: V_a − V_b
+        if abs(dv) < _ZERO_SNAP:
+            dv = 0.0
+
         if comp.type == "resistor":
             r = comp.params.get("resistance", 1000) or 1000
+            # Passive sign convention: I = ΔV / R, positive means a→b
             current = dv / r
         elif comp.type == "capacitor":
             current = 0.0
         elif comp.type in ("vsource_dc", "battery", "vsource_dep", "vsource_ac"):
             ru = comp.ref.upper()
             vref = ru if ru.startswith("V") else f"V{ru}"
-            current = op_values.get(f"I({vref})", 0.0)
+            # ngspice v#branch = current INTO positive terminal.
+            # Negate → conventional current EXITING positive terminal.
+            raw_i = op_values.get(f"I({vref})", 0.0)
+            current = -raw_i  # positive = flowing out of + terminal into the circuit
         else:
-            current = dv
+            current = dv  # fallback
+
+        # Direction follows actual current sign (passive sign convention)
         if abs(current) < 1e-15:
             direction = "none"
         elif current > 0:
             direction = "a_to_b"
         else:
             direction = "b_to_a"
+
         branches.append({
             "component_id": comp.id,
             "ref": comp.ref,
             "type": comp.type,
             "node_a": na,
             "node_b": nb,
-            "voltage_a": round(va, 6),
-            "voltage_b": round(vb, 6),
-            "delta_v": round(dv, 6),
+            "voltage_a": 0.0 if abs(va) < _ZERO_SNAP else round(va, 6),
+            "voltage_b": 0.0 if abs(vb) < _ZERO_SNAP else round(vb, 6),
+            "delta_v": 0.0 if abs(dv) < _ZERO_SNAP else round(dv, 6),
             "current_a": round(current, 9),
             "direction": direction,
         })
     print("=== Branch analysis ===")
     for b in branches:
         arrow = "a->b" if b["direction"] == "a_to_b" else ("b->a" if b["direction"] == "b_to_a" else " 0 ")
-        print(f"  {b['ref']:5s} ({b['type']:12s})  dV={b['delta_v']:+.4f}V  I={b['current_a']:+.6e}A  [{arrow}]")
+        print(f"  {b['ref']:5s} ({b['type']:12s})  Va={b['voltage_a']:+.3f}V  Vb={b['voltage_b']:+.3f}V  dV={b['delta_v']:+.4f}V  I={b['current_a']:+.6e}A  [{arrow}]")
     print("=======================\n")
     return branches
 

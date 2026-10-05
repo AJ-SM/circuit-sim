@@ -18,27 +18,15 @@ interface Props {
   isPinConnected: (pinId: string) => boolean;
   /** NEW (optional): branch analysis result for this component from last simulation */
   branchInfo?: BranchInfo | null;
+  /** Whether the branch analysis badge should be displayed */
+  showBranchBadge?: boolean;
+  /** Callback when user clicks to toggle the branch badge */
+  onToggleBranchBadge?: () => void;
+  /** Callback when user clicks on component body */
+  onClickBody?: (e: React.MouseEvent) => void;
 }
 
-/** Format Amperes to a compact human string, e.g. 0.005 -> "5.00mA" */
-function fmtAmps(a: number): string {
-  const abs = Math.abs(a);
-  if (abs === 0) return "0A";
-  if (abs >= 1) return `${a.toFixed(3)}A`;
-  if (abs >= 1e-3) return `${(a * 1e3).toFixed(2)}mA`;
-  if (abs >= 1e-6) return `${(a * 1e6).toFixed(2)}uA`;
-  if (abs >= 1e-9) return `${(a * 1e9).toFixed(2)}nA`;
-  return `${a.toExponential(2)}A`;
-}
 
-/** Format Volts to a compact human string */
-function fmtVolts(v: number): string {
-  const abs = Math.abs(v);
-  if (abs === 0) return "0V";
-  if (abs >= 1) return `${v.toFixed(3)}V`;
-  if (abs >= 1e-3) return `${(v * 1e3).toFixed(2)}mV`;
-  return `${v.toExponential(2)}V`;
-}
 
 export function ComponentView({
   component,
@@ -51,6 +39,9 @@ export function ComponentView({
   onPinPointerLeave,
   isPinConnected,
   branchInfo,
+  showBranchBadge = false,
+  onToggleBranchBadge,
+  onClickBody,
 }: Props) {
   const def = getDef(component.kind);
   const Symbol = SYMBOLS[def.symbolId];
@@ -67,8 +58,6 @@ export function ComponentView({
     return formatSIValue(component.params[p.key] ?? p.default, p.unit);
   }, [def, component.params]);
 
-  // Badge position: below the ref-id label (above the component body center)
-  const badgeY = -def.size.h * GRID_SIZE * 0.75 + 26;
 
   return (
     <g
@@ -78,7 +67,8 @@ export function ComponentView({
       <g
         transform={`rotate(${component.rotation}) scale(${scaleX}, 1)`}
         onPointerDown={onPointerDownBody}
-        style={{ cursor: "grab" }}
+        onClick={onClickBody}
+        style={{ cursor: branchInfo ? "pointer" : "grab" }}
       >
         {selected && (
           <rect
@@ -126,6 +116,9 @@ export function ComponentView({
               onPointerUp={(e) => {
                 onPinPointerUp({ componentId: component.id, pinId: pin.id }, e);
               }}
+              onClick={(e) => {
+                e.stopPropagation();
+              }}
             />
           );
         })}
@@ -157,53 +150,83 @@ export function ComponentView({
         </text>
       )}
 
-      {/* ── simulation analysis badge ── */}
-      {branchInfo && (() => {
+      {/* ── simulation analysis badge (toggled on demand) ── */}
+      {showBranchBadge && branchInfo && (() => {
         const dv = branchInfo.delta_v;
         const ia = branchInfo.current_a;
         const dir = branchInfo.direction;
 
+        // ΔV: show absolute value; clamp < 1mV strictly to "0.00 V"
+        const absDv = Math.abs(dv);
         const dvText = (() => {
-          const abs = Math.abs(dv);
-          if (abs < 1e-9) return "0.00 V";
-          if (abs >= 1)   return `${dv.toFixed(2)} V`;
-          if (abs >= 1e-3) return `${(dv * 1e3).toFixed(1)} mV`;
-          return `${dv.toExponential(1)} V`;
+          if (absDv < 1e-3) return "0.00 V";
+          if (absDv >= 1)    return `${absDv.toFixed(2)} V`;
+          return `${(absDv * 1e3).toFixed(1)} mV`;
         })();
 
+        // I: always show absolute magnitude; direction conveyed by arrow
+        const absIa = Math.abs(ia);
         const iaText = (() => {
-          const abs = Math.abs(ia);
-          if (abs === 0)   return "0 A";
-          if (abs >= 1)    return `${ia.toFixed(2)} A`;
-          if (abs >= 1e-3) return `${(ia * 1e3).toFixed(1)} mA`;
-          if (abs >= 1e-6) return `${(ia * 1e6).toFixed(1)} µA`;
-          if (abs >= 1e-9) return `${(ia * 1e9).toFixed(1)} nA`;
-          return `${ia.toExponential(1)} A`;
+          if (absIa === 0)    return "0 A";
+          if (absIa >= 1)     return `${absIa.toFixed(2)} A`;
+          if (absIa >= 1e-3)  return `${(absIa * 1e3).toFixed(1)} mA`;
+          if (absIa >= 1e-6)  return `${(absIa * 1e6).toFixed(1)} µA`;
+          if (absIa >= 1e-9)  return `${(absIa * 1e9).toFixed(1)} nA`;
+          return `${absIa.toExponential(1)} A`;
         })();
 
+        // Direction arrow: → means current flows a→b (from p1 to p2)
         const dirArrow =
           dir === "a_to_b" ? "→" :
           dir === "b_to_a" ? "←" : "·";
-        const dirColor =
-          dir === "none" ? "#888" : "#6effb0";
+        // Amber for active flow, gray for no current
+        const dirColor = dir === "none" ? "#64748b" : "#ffb454";
 
-        const bx = -46;
-        const by = badgeY - 2;
+        // Popup alignment relative to component bounds:
+        // - Horizontal components: centered directly beneath the component body
+        // - Vertical components: alongside the component body to the right with clear margin
+        // - Diagonal components: offset outward
+        const isVertical = component.rotation === 90 || component.rotation === 270;
+        const isDiagonalRot = component.rotation % 90 !== 0;
+
         const bw = 92;
         const bh = 42;
 
+        let bx = -bw / 2;
+        let by = def.size.h * GRID_SIZE * 0.6 + 14;
+
+        if (isVertical) {
+          bx = def.size.w * GRID_SIZE * 0.5 + 16;
+          by = -bh / 2;
+        } else if (isDiagonalRot) {
+          bx = 24;
+          by = 24;
+        } else {
+          bx = -bw / 2;
+          by = def.size.h * GRID_SIZE * 0.6 + 14;
+        }
+
         return (
-          <g className="branch-badge" pointerEvents="none">
+          <g
+            className="branch-badge"
+            pointerEvents="auto"
+            onClick={(e) => {
+              e.stopPropagation();
+              onToggleBranchBadge?.();
+            }}
+            style={{ cursor: "pointer" }}
+          >
+            <title>Click to hide measurements</title>
             {/* glow halo */}
             <rect x={bx - 2} y={by - 2} width={bw + 4} height={bh + 4}
-              rx={7} fill="rgba(110,255,176,0.06)"
+              rx={7} fill="rgba(110,255,176,0.08)"
               style={{ filter: "blur(6px)" }}
             />
             {/* main card */}
             <rect x={bx} y={by} width={bw} height={bh}
               rx={5}
-              fill="rgba(6,10,8,0.92)"
-              stroke="rgba(110,255,176,0.22)"
+              fill="rgba(6,10,8,0.95)"
+              stroke="rgba(110,255,176,0.3)"
               strokeWidth={1}
             />
             {/* left accent bar */}
@@ -246,6 +269,14 @@ export function ComponentView({
               fontSize={10} fontFamily="var(--font-mono)"
               fontWeight={900} fill={dirColor}>
               {dirArrow}
+            </text>
+
+            {/* close x icon */}
+            <text x={bx + bw - 7} y={by + 9}
+              textAnchor="middle"
+              fontSize={9} fontFamily="var(--font-mono)"
+              fill="#64748b" opacity={0.7}>
+              {"×"}
             </text>
           </g>
         );

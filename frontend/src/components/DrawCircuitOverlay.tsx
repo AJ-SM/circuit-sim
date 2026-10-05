@@ -58,6 +58,7 @@ const RTP_DELAY = 450;
 export function DrawCircuitOverlay({ onClose, pickImageOnOpen }: DrawCircuitOverlayProps) {
   const loadNetlist = useCircuitStore((s) => s.loadNetlist);
   const clearAll = useCircuitStore((s) => s.clearAll);
+  const runSimulate = useCircuitStore((s) => s.runSimulate);
 
   const surfaceRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -312,6 +313,12 @@ export function DrawCircuitOverlay({ onClose, pickImageOnOpen }: DrawCircuitOver
         alert(
           `Circuit generated.\n\nThese detected parts aren't drawable on the canvas yet and were skipped:\n  ${skipped.join(", ")}`
         );
+      }
+      // If the placed circuit contains a ground, trigger simulation automatically so
+      // current flow and directions animate immediately without cluttering the screen with badges.
+      const currentComponents = useCircuitStore.getState().components;
+      if (currentComponents.some((c) => c.kind === "ground")) {
+        runSimulate().catch(() => {});
       }
       onClose();
     } catch (err) {
