@@ -10,6 +10,8 @@ export interface NodeVoltageLabel {
   pinDir?: { x: number; y: number };
   compRotation?: number;
   isGround?: boolean;
+  /** The pin belongs to a ground symbol (not just a part tied to 0 V). */
+  isGroundSymbol?: boolean;
 }
 
 interface Props {
@@ -26,44 +28,27 @@ export function fmtVolts(v: number): string {
 }
 
 /**
- * Compute explicit offset for node voltage badges away from wires,
- * terminals, and component bodies to eliminate overlap:
- * - Horizontal nodes: placed above the node dot, never directly over the wire line.
- * - Vertical nodes: offset to the left of the terminal point with 14-16px padding.
- * - Ground nodes: offset to the side away from the ground symbol and traces.
+ * Where a node-voltage pill goes relative to its pin, chosen so it never
+ * lands on the part's ref/value labels or its V/I popup:
+ * - Horizontal part: just outside the pin, above the wire (labels are above
+ *   the body, between the pins; the popup is below).
+ * - Vertical part: to the right, beyond the pin (labels are on the left; the
+ *   popup is to the right but level with the body, between the pins).
+ * - Ground symbol: to the right of its single pin.
  */
-function computeNodeBadgeOffset(
-  lbl: NodeVoltageLabel,
-  textW: number
-): { x: number; y: number } {
-  if (lbl.isGround || lbl.nodeId.startsWith("0:")) {
-    // Ground reference: offset to the side with clean clearance
-    return { x: textW / 2 + 16, y: -4 };
-  }
-
-  const rot = lbl.compRotation ?? 0;
-  const isVertical = rot === 90 || rot === 270;
+function computeNodeBadgeOffset(lbl: NodeVoltageLabel, textW: number): { x: number; y: number } {
   const dir = lbl.pinDir ?? { x: 0, y: 0 };
+  if (lbl.isGroundSymbol) return { x: textW / 2 + 12, y: 0 };
 
-  if (isVertical) {
-    // Vertical wire / node: offset to the left with 14px padding so it never
-    // collides with the vertical wire trace or the component popup (which sits to the right)
-    return {
-      x: -textW / 2 - 14,
-      y: dir.y < 0 ? -4 : 4,
-    };
+  const rot = (((lbl.compRotation ?? 0) % 360) + 360) % 360;
+  if (rot === 90 || rot === 270) {
+    return { x: textW / 2 + 8, y: (dir.y < 0 ? -1 : 1) * 16 };
   }
-
-  // Horizontal wire / node: place badge cleanly above the node dot (20px above),
-  // with a slight outward horizontal bias away from the component body
-  let biasX = 0;
-  if (dir.x < 0) biasX = -8;      // left pin: bias outward to the left
-  else if (dir.x > 0) biasX = 8;  // right pin: bias outward to the right
-
-  return {
-    x: biasX,
-    y: -20,
-  };
+  if (rot % 90 === 0) {
+    return { x: (dir.x < 0 ? -1 : 1) * (textW / 2 + 6), y: -11 };
+  }
+  // Diagonal parts: outward along the pin, nudged up.
+  return { x: dir.x * (textW / 2 + 6), y: dir.y * 12 - 6 };
 }
 
 /**
@@ -137,6 +122,7 @@ export interface PinWorldPos {
   pinDir?: { x: number; y: number };
   compRotation?: number;
   isGround?: boolean;
+  isGroundSymbol?: boolean;
 }
 
 export function buildNodeLabels(
@@ -171,6 +157,7 @@ export function buildNodeLabels(
       pinDir: pw.pinDir,
       compRotation: pw.compRotation,
       isGround: pw.isGround,
+      isGroundSymbol: pw.isGroundSymbol,
     });
   }
 

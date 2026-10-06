@@ -68,7 +68,6 @@ interface Props {
   currentAmperes?: number;
   currentDirection?: "a_to_b" | "b_to_a" | "none";
   avgVoltage?: number;
-  showCurrentLabel?: boolean;
   /** Draw flow arrows and moving dashes when current flows. */
   showFlow?: boolean;
   /** Voltage-direction arrows near each end, relative to the part on that
@@ -110,7 +109,7 @@ function flowSpeed(amps: number): string {
 export function WireView({
   points, dirs, selected, route, onPointerDown,
   currentAmperes, currentDirection, avgVoltage,
-  showCurrentLabel = false, showFlow = true, labelMode = "off", voltageArrows,
+  showFlow = true, labelMode = "off", voltageArrows,
 }: Props) {
   if (points.length < 2) return null;
   const [a, b] = points;
@@ -189,9 +188,9 @@ export function WireView({
   const speed = hasFlow ? flowSpeed(currentAmperes!) : "1s";
 
   // Current: always the absolute magnitude — direction is shown by the arrow.
-  // Selecting the wire (or toggling a component's badge) shows the current
-  // even when the wire-label mode leaves it out.
-  const wantCurrent = labelMode === "current" || labelMode === "both" || selected || showCurrentLabel;
+  // Selecting the wire shows its current even when the wire-label mode
+  // leaves it out. Inspecting a part never adds wire labels.
+  const wantCurrent = labelMode === "current" || labelMode === "both" || selected;
   const wantVoltage = labelMode === "voltage" || labelMode === "both";
   const iText = wantCurrent && carriesCurrent ? fmtAmps(Math.abs(currentAmperes!)) : null;
   const vText = wantVoltage && avgVoltage !== undefined ? fmtVolts(avgVoltage) : null;

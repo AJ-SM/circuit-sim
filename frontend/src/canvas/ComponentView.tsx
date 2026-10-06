@@ -130,31 +130,35 @@ export function ComponentView({
         })}
       </g>
 
-      {/* ref-id label */}
-      {showLabels && <text
-        x={0}
-        y={-def.size.h * GRID_SIZE * 0.75 - 6}
-        textAnchor="middle"
-        fontSize={11}
-        fill="var(--text-primary)"
-        fontFamily="var(--font-label)"
-      >
-        {component.refId}
-      </text>}
-
-      {/* value label */}
-      {showLabels && valueLabel && (
-        <text
-          x={0}
-          y={-def.size.h * GRID_SIZE * 0.75 + 10}
-          textAnchor="middle"
-          fontSize={10}
-          fill="var(--text-dim)"
-          fontFamily="var(--font-label)"
-        >
-          {valueLabel}
-        </text>
-      )}
+      {/* ref + value labels. They take the side the readings never use:
+          above a horizontal part (V/I popup goes below, node pills sit out
+          past the pins) and left of a vertical one (popup and pills go to
+          the right). Ground symbols aren't labelled. */}
+      {showLabels && component.kind !== "ground" && (() => {
+        const rot = ((component.rotation % 360) + 360) % 360;
+        const vertical = rot === 90 || rot === 270;
+        const top = -def.size.h * GRID_SIZE * 0.5;
+        const ref = vertical
+          ? { x: -14, y: valueLabel ? -2 : 4, anchor: "end" as const }
+          : { x: 0, y: top - (valueLabel ? 16 : 5), anchor: "middle" as const };
+        const val = vertical
+          ? { x: -14, y: 11, anchor: "end" as const }
+          : { x: 0, y: top - 4, anchor: "middle" as const };
+        return (
+          <g pointerEvents="none">
+            <text x={ref.x} y={ref.y} textAnchor={ref.anchor} fontSize={11}
+              fill="var(--text-primary)" fontFamily="var(--font-label)">
+              {component.refId}
+            </text>
+            {valueLabel && (
+              <text x={val.x} y={val.y} textAnchor={val.anchor} fontSize={10}
+                fill="var(--text-dim)" fontFamily="var(--font-label)">
+                {valueLabel}
+              </text>
+            )}
+          </g>
+        );
+      })()}
 
       {/* ── simulation analysis badge (toggled by clicking with the eye on) ── */}
       {showBranchBadge && branchInfo && (() => {

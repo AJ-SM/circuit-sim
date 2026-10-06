@@ -49,10 +49,11 @@ export interface DisplayOptions {
   componentLabels: boolean;
 }
 
-// On-wire overlays start hidden; values are opened per part with its eye
-// icon, or switched on for every wire from the Display section.
+// Current-direction arrows start on; the other on-wire overlays start
+// hidden (values are opened per part with Inspect, or for every wire from
+// the Display section).
 export const DEFAULT_DISPLAY: DisplayOptions = {
-  currentDirection: false,
+  currentDirection: true,
   voltageDirection: false,
   wireLabels: "off",
   componentLabels: true,

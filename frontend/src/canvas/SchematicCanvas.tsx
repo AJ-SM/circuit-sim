@@ -372,6 +372,7 @@ export function SchematicCanvas() {
           pinDir: dir,
           compRotation: c.rotation,
           isGround: c.kind === "ground" || nodeId === "0",
+          isGroundSymbol: c.kind === "ground",
         };
       });
     });
@@ -479,13 +480,6 @@ export function SchematicCanvas() {
                   : undefined
               }
               labelMode={analysisActive ? display.wireLabels : "off"}
-              showCurrentLabel={
-                analysisActive &&
-                (
-                  (badgeVisibleIds?.has(w.from.componentId) ?? false) ||
-                  (badgeVisibleIds?.has(w.to.componentId) ?? false)
-                )
-              }
             />
           );
         })}

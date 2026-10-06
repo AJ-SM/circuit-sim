@@ -13,7 +13,7 @@
   --amber-dim: #8a6a3a;
   --select: #4da3ff;         /* selected part / wire */
   --sim-voltage: #d14fc4;    /* every voltage shown after a simulation (magenta) */
-  --sim-current: #e8a317;    /* every current shown after a simulation (amber) */
+  --sim-current: #ffffff;    /* every current shown after a simulation (white) */
   --sim-label-ink: #15171a;  /* text on the solid voltage/current pills */
   --danger: #e5534b;
 
