@@ -59,6 +59,7 @@ export function DrawCircuitOverlay({ onClose, pickImageOnOpen }: DrawCircuitOver
   const loadNetlist = useCircuitStore((s) => s.loadNetlist);
   const clearAll = useCircuitStore((s) => s.clearAll);
   const runSimulate = useCircuitStore((s) => s.runSimulate);
+  const setCapturingValues = useCircuitStore((s) => s.setCapturingValues);
 
   const surfaceRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -86,7 +87,9 @@ export function DrawCircuitOverlay({ onClose, pickImageOnOpen }: DrawCircuitOver
   >(null);
   const [detecting, setDetecting] = useState(false);
   /** Full circuit recognised in the background for the current drawing. */
-  const prefetchRef = useRef<{ version: number; result: Promise<JsonNetlist> } | null>(null);
+  const prefetchRef = useRef<
+    { version: number; result: Promise<JsonNetlist>; done: boolean } | null
+  >(null);
   const prefetchBusyRef = useRef(false);
 
   useEffect(() => {
@@ -112,8 +115,12 @@ export function DrawCircuitOverlay({ onClose, pickImageOnOpen }: DrawCircuitOver
         if (items.length > 0 && !prefetchBusyRef.current) {
           prefetchBusyRef.current = true;
           const result = generateCircuitFromImage(png, undefined, items);
-          result.catch(() => {}).finally(() => (prefetchBusyRef.current = false));
-          prefetchRef.current = { version, result };
+          const entry = { version, result, done: false };
+          result
+            .then(() => (entry.done = true))
+            .catch(() => {})
+            .finally(() => (prefetchBusyRef.current = false));
+          prefetchRef.current = entry;
         }
       } catch {
         /* aborted by newer ink, or backend unreachable: keep last boxes */
@@ -297,44 +304,84 @@ export function DrawCircuitOverlay({ onClose, pickImageOnOpen }: DrawCircuitOver
     redraw();
   }
 
+  /** Replace the schematic with `netlist`; returns the skipped parts. */
+  function place(netlist: JsonNetlist): string[] {
+    if (!netlist.components?.length) {
+      throw new Error(
+        "The model found symbols but couldn't connect them into a circuit. " +
+          "Make sure every wire touches the component ends."
+      );
+    }
+    // Wipe the previous schematic completely before placing the new one.
+    clearAll();
+    return loadNetlist(netlist);
+  }
+
+  /** Last step for a circuit with its values in: report skipped parts and
+   *  simulate right away so current flow animates immediately (a hidden
+   *  default ground is used when the circuit has none). */
+  function finish(skipped: string[]) {
+    if (skipped.length > 0) {
+      alert(
+        `Circuit generated.
+
+These detected parts aren't drawable on the canvas yet and were skipped:
+  ${skipped.join(", ")}`
+      );
+    }
+    if (useCircuitStore.getState().components.length > 0) {
+      runSimulate().catch(() => {});
+    }
+  }
+
+  /** Two steps: (1) recognise the circuit without OCR and place it straight
+   *  away with default values, then (2) freeze the screen ("Capturing
+   *  Values") while OCR reads the written values, and place the final
+   *  circuit. Step 2 outlives this overlay, which closes after step 1. */
   async function handleGenerate() {
     setStatus("generating");
     setError(null);
+    // With RTP on, reuse what was already recognised for this exact ink:
+    // the background result (which includes OCR) and the detected
+    // components (skipping detection on the server).
+    const pre = rtp && !image && prefetchRef.current?.version === drawVersion ? prefetchRef.current : null;
+    const det = rtp && !image && detections?.version === drawVersion ? detections : null;
+    const png = det?.png ?? image ?? exportForModel();
+
+    let quick: Awaited<ReturnType<typeof generateCircuitFromImage>>;
     try {
-      // With RTP on, reuse what was already recognised for this exact ink:
-      // the finished background result if there is one, otherwise the
-      // detected components (skipping detection on the server).
-      const pre = prefetchRef.current;
-      const det = rtp && !image && detections?.version === drawVersion ? detections : null;
-      const netlist =
-        rtp && !image && pre && pre.version === drawVersion
-          ? await pre.result
-          : det && det.items.length > 0
-            ? await generateCircuitFromImage(det.png, undefined, det.items)
-            : await generateCircuitFromImage(image ?? exportForModel());
-      if (!netlist.components?.length) {
-        throw new Error(
-          "The model found symbols but couldn't connect them into a circuit. " +
-            "Make sure every wire touches the component ends."
-        );
+      if (pre?.done) {
+        // Values are already read: one step, no freeze.
+        finish(place(await pre.result));
+        onClose();
+        return;
       }
-      // Wipe the previous schematic completely before placing the new one.
-      clearAll();
-      const skipped = loadNetlist(netlist);
-      if (skipped.length > 0) {
-        alert(
-          `Circuit generated.\n\nThese detected parts aren't drawable on the canvas yet and were skipped:\n  ${skipped.join(", ")}`
-        );
-      }
-      // Simulate right away so current flow animates immediately; a hidden
-      // default ground is used when the circuit has none.
-      if (useCircuitStore.getState().components.length > 0) {
-        runSimulate().catch(() => {});
-      }
-      onClose();
+      quick = await generateCircuitFromImage(
+        png,
+        undefined,
+        det && det.items.length > 0 ? det.items : undefined,
+        false
+      );
+      place(quick);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
       setStatus("idle");
+      return;
+    }
+
+    setCapturingValues(true);
+    onClose();
+    try {
+      const full = pre
+        ? await pre.result
+        : await generateCircuitFromImage(png, undefined, quick.detections, true);
+      finish(place(full));
+    } catch (err) {
+      // Keep the circuit placed with default values.
+      console.warn("[generate] reading values failed:", err);
+      finish([]);
+    } finally {
+      setCapturingValues(false);
     }
   }
 

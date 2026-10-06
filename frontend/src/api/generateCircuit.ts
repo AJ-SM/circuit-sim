@@ -8,18 +8,21 @@ export const GENERATE_ENDPOINT =
 
 /** Send a drawn circuit (PNG data URL) to the model and get back a netlist
  *  in the same format as circuitmodel's netlist.json. Pass `detections`
- *  already made on this exact image (RTP) to skip re-running detection. */
+ *  already made on this exact image (RTP) to skip re-running detection.
+ *  With `ocr: false` the backend skips reading values (fast; every part
+ *  gets its default) and returns `detections` for the follow-up OCR call. */
 export async function generateCircuitFromImage(
   imageDataUrl: string,
   title = "drawn-circuit",
-  detections?: Detection[]
-): Promise<JsonNetlist> {
+  detections?: Detection[],
+  ocr = true
+): Promise<JsonNetlist & { detections?: Detection[] }> {
   let response: Response;
   try {
     response = await fetch(GENERATE_ENDPOINT, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ image: imageDataUrl, title, detections }),
+      body: JSON.stringify({ image: imageDataUrl, title, detections, ocr }),
     });
   } catch {
     throw new Error(
@@ -38,7 +41,7 @@ export async function generateCircuitFromImage(
     throw new Error(detail || `Backend returned ${response.status}`);
   }
 
-  return (await response.json()) as JsonNetlist;
+  return (await response.json()) as JsonNetlist & { detections?: Detection[] };
 }
 
 /** Detection-only route used by run-time processing (RTP) while drawing.

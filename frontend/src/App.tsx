@@ -29,6 +29,7 @@ export default function App() {
   const [pickImage, setPickImage] = useState(false);
   const netlistRaw = useCircuitStore((s) => s.netlistRaw);
   const sceneVersion = useCircuitStore((s) => s.sceneVersion);
+  const capturingValues = useCircuitStore((s) => s.capturingValues);
   const branchCount = useCircuitStore((s) =>
     s.simStatus === "done" ? s.simResult?.branch_analysis?.length ?? 0 : 0
   );
@@ -105,6 +106,14 @@ export default function App() {
           <BranchAnalysisPanel />
         )}
       </div>
+      {capturingValues && (
+        <div className="capture-freeze" role="alertdialog" aria-busy="true" aria-label="Capturing Values">
+          <div className="capture-freeze-card">
+            <span className="capture-spinner" aria-hidden="true" />
+            <span>Capturing Values</span>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

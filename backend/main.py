@@ -411,6 +411,8 @@ class GenerateCircuitRequest(BaseModel):
     # Boxes already found by /detect-components on this exact image (RTP).
     # When given, /generate-circuit reuses them instead of re-running YOLO.
     detections: list[dict[str, Any]] | None = None
+    # False: skip reading values/names (fast first pass; defaults are used).
+    ocr: bool = True
 
 def _decode_request_image(req: GenerateCircuitRequest):
     import base64
@@ -448,7 +450,7 @@ def generate_circuit(req: GenerateCircuitRequest) -> dict[str, Any]:
         except (KeyError, TypeError, ValueError):
             raise HTTPException(status_code=400, detail="Malformed detections.")
     try:
-        return recognize(image, title=req.title, boxes=boxes)
+        return recognize(image, title=req.title, boxes=boxes, ocr=req.ocr)
     except RecognitionError as e:
         raise HTTPException(status_code=422, detail=str(e))
 

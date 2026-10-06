@@ -87,6 +87,10 @@ interface CircuitState {
   clearToggledBadges: () => void;
   /** Toolbar eye: while on, clicking a part shows / hides its V and I. */
   inspectMode: boolean;
+  /** A generated circuit is on screen and its values are still being read
+   *  (OCR); the whole app is frozen until it finishes. */
+  capturingValues: boolean;
+  setCapturingValues: (on: boolean) => void;
   setInspectMode: (on: boolean) => void;
   display: DisplayOptions;
   setDisplay: (patch: Partial<DisplayOptions>) => void;
@@ -149,6 +153,8 @@ export const useCircuitStore = create<CircuitState>((set, get) => ({
   setShowAllBadges: (show: boolean) => set({ showAllBadges: show }),
   clearToggledBadges: () => set({ toggledBadgeIds: [] }),
   inspectMode: false,
+  capturingValues: false,
+  setCapturingValues: (on) => set({ capturingValues: on }),
   // Turning the eye off also closes any stats opened with it.
   setInspectMode: (on) => set(on ? { inspectMode: true } : { inspectMode: false, toggledBadgeIds: [] }),
   display: DEFAULT_DISPLAY,

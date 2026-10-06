@@ -64,6 +64,8 @@ export function SchematicCanvas() {
   // --- keyboard shortcuts ---
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
+      // Frozen while a generated circuit's values are being read.
+      if (useCircuitStore.getState().capturingValues) return;
       if (e.key === "Delete" || e.key === "Backspace") {
         if ((e.target as HTMLElement)?.tagName === "INPUT") return;
         deleteSelected();

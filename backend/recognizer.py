@@ -250,10 +250,13 @@ def _rename(components, conn_result, topology, names: dict[str, str]) -> None:
                                    int(re.sub(r"\D", "", c.component_id) or 0)))
 
 
-def recognize(image: np.ndarray, title: str = "drawn-circuit", boxes: list | None = None) -> dict:
+def recognize(image: np.ndarray, title: str = "drawn-circuit", boxes: list | None = None,
+              ocr: bool = True) -> dict:
     """Run the full pipeline and return the netlist JSON dict. `boxes` are
     detections already made on this image (run-time processing); when given,
-    detection is skipped."""
+    detection is skipped. With `ocr=False` the slow value/name reading is
+    skipped (every part keeps its default value) and the detections are
+    returned so a second, OCR-only call can reuse them."""
     from netlist_generator import NetlistGenerator
     from drawn_topology    import DrawnTopology
     from value_reader      import (assign_designators, assign_values, format_spice,
@@ -282,8 +285,8 @@ def recognize(image: np.ndarray, title: str = "drawn-circuit", boxes: list | Non
     # Drawn names ("R5") rename their part, and the value written under a
     # name is that part's value. Parts without a name fall back to the
     # nearest unused value label.
-    ocr_items = run_ocr(image)
-    designators = read_designators(image, ocr_items)
+    ocr_items = run_ocr(image) if ocr else []
+    designators = read_designators(image, ocr_items) if ocr else []
     named = assign_designators(components, designators)
     _rename(components, conn_result, topology, {cid: d.name for cid, d in named.items()})
 
@@ -354,4 +357,6 @@ def recognize(image: np.ndarray, title: str = "drawn-circuit", boxes: list | Non
          "bbox": {"x1": d.x1, "y1": d.y1, "x2": d.x2, "y2": d.y2}}
         for d in dropped
     ]
+    if not ocr:
+        result["detections"] = [box_to_json(b) for b in boxes]
     return result
