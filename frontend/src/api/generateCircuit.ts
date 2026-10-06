@@ -1,22 +1,25 @@
 import type { JsonNetlist } from "../utils/loadNetlistJson";
+import { BACKEND_ORIGIN } from "./backendOrigin";
 
 /** Backend route that runs the circuitmodel YOLO pipeline on an image.
  *  Override with VITE_GENERATE_URL in a .env file. */
 export const GENERATE_ENDPOINT =
-  import.meta.env.VITE_GENERATE_URL ?? "http://localhost:8000/generate-circuit";
+  import.meta.env.VITE_GENERATE_URL ?? `${BACKEND_ORIGIN}/generate-circuit`;
 
 /** Send a drawn circuit (PNG data URL) to the model and get back a netlist
- *  in the same format as circuitmodel's netlist.json. */
+ *  in the same format as circuitmodel's netlist.json. Pass `detections`
+ *  already made on this exact image (RTP) to skip re-running detection. */
 export async function generateCircuitFromImage(
   imageDataUrl: string,
-  title = "drawn-circuit"
+  title = "drawn-circuit",
+  detections?: Detection[]
 ): Promise<JsonNetlist> {
   let response: Response;
   try {
     response = await fetch(GENERATE_ENDPOINT, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ image: imageDataUrl, title }),
+      body: JSON.stringify({ image: imageDataUrl, title, detections }),
     });
   } catch {
     throw new Error(
@@ -48,6 +51,8 @@ export interface Detection {
   conf: number;
   /** Box in the pixels of the image that was sent. */
   bbox: { x1: number; y1: number; x2: number; y2: number };
+  /** Oriented outline when the symbol was found in a rotated view. */
+  poly?: number[][];
 }
 
 /** Run component detection only (no wires, no OCR) on a drawing. */

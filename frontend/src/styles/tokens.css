@@ -1,26 +1,31 @@
 :root {
-  /* -- Color: an instrument-panel palette, not a marketing one -- */
-  --bg-canvas: #0a0f0c;
-  --bg-panel: #101512;
-  --bg-panel-alt: #161c18;
-  --bg-raised: #1b2320;
-  --line-grid: #1c2621;
-  --line-border: #253530;
+  /* -- Color: a sober schematic-editor palette (flat, no glow) -- */
+  --bg-canvas: #1b1e22;
+  --bg-panel: #202328;
+  --bg-panel-alt: #25292e;
+  --bg-raised: #2a2e34;
+  --line-grid: #343a41;      /* grid dots */
+  --line-border: #3a4048;
 
-  --phosphor: #6effb0;       /* live traces, connected pins, success */
-  --phosphor-dim: #3c7a5c;
-  --amber: #ffb454;          /* selection, hover targets, running state */
+  --phosphor: #5aa974;       /* wires, connected pins, success (muted green) */
+  --phosphor-dim: #3d6e4e;
+  --amber: #e0a040;          /* running state, hover targets */
   --amber-dim: #8a6a3a;
-  --danger: #ff6b6b;
+  --select: #4da3ff;         /* selected part / wire */
+  --sim-voltage: #d14fc4;    /* every voltage shown after a simulation (magenta) */
+  --sim-current: #e8a317;    /* every current shown after a simulation (amber) */
+  --sim-label-ink: #15171a;  /* text on the solid voltage/current pills */
+  --danger: #e5534b;
 
-  --text-primary: #dcebe2;
-  --text-dim: #75897e;
-  --text-faint: #445048;
+  --text-primary: #d3d8de;   /* part outlines and ref labels */
+  --text-dim: #8b949e;
+  --text-faint: #5a626b;
 
-  /* -- Type: mono for readouts (this is an instrument), grotesk for
-     the few display moments -- */
-  --font-display: "Space Grotesk", "IBM Plex Mono", monospace;
-  --font-mono: "IBM Plex Mono", "JetBrains Mono", ui-monospace, monospace;
+  /* -- Type: a clean sans for everything on the schematic (tabular digits
+     keep readouts steady); mono only for raw JSON / code views -- */
+  --font-display: "IBM Plex Sans", "Segoe UI", Arial, sans-serif;
+  --font-label: "IBM Plex Sans", "Segoe UI", Arial, sans-serif;
+  --font-mono: "IBM Plex Mono", Consolas, ui-monospace, monospace;
 
   --radius-sm: 3px;
   --radius-md: 6px;

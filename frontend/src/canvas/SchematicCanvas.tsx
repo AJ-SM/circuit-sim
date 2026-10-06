@@ -3,9 +3,9 @@ import { useCircuitStore } from "../store/circuitStore";
 import { getDef } from "../domain/componentDefs";
 import { buildNetlist } from "../domain/netlist";
 import { GRID_SIZE, pinDirection, resolvePinWorld, snap } from "../utils/geometry";
-import { useCanvasView } from "./useCanvasView";
+import { MAX_ZOOM, MIN_ZOOM, useCanvasView } from "./useCanvasView";
 import { ComponentView } from "./ComponentView";
-import { WireView } from "./WireView";
+import { WireView, type VoltageEnd } from "./WireView";
 import { AnalysisOverlay, buildNodeLabels } from "./AnalysisOverlay";
 import type { ComponentKind, PinRef } from "../types/circuit";
 import type { BranchInfo } from "../api/simulate";
@@ -14,14 +14,24 @@ const DOT = 1.5;
 
 export function SchematicCanvas() {
   const svgRef = useRef<SVGSVGElement>(null);
-  const { view, screenToGrid, beginPan, updatePan, endPan, zoomAt } =
+  const contentRef = useRef<SVGGElement>(null);
+  const { view, screenToGrid, beginPan, updatePan, endPan, zoomAt, zoomIn, zoomOut, fitTo } =
     useCanvasView(svgRef);
+
+  /** Centre the whole circuit (parts, wires and labels) in the canvas. */
+  const fitToContent = useCallback(() => {
+    const g = contentRef.current;
+    const box = g && g.childElementCount > 0 ? g.getBBox() : null;
+    fitTo(box && box.width > 0 && box.height > 0 ? box : null);
+  }, [fitTo]);
 
   const components = useCircuitStore((s) => s.components);
   const simResult = useCircuitStore((s) => s.simResult);
   const simStatus = useCircuitStore((s) => s.simStatus);
   const toggledBadgeIds = useCircuitStore((s) => s.toggledBadgeIds);
   const showAllBadges = useCircuitStore((s) => s.showAllBadges);
+  const display = useCircuitStore((s) => s.display);
+  const inspectMode = useCircuitStore((s) => s.inspectMode);
   const toggleComponentBadge = useCircuitStore((s) => s.toggleComponentBadge);
   const wires = useCircuitStore((s) => s.wires);
   const rawWireSegments = useCircuitStore((s) => s.rawWireSegments);
@@ -60,6 +70,15 @@ export function SchematicCanvas() {
         rotateComponent(selection.id, e.shiftKey ? 45 : 90);
       } else if (e.key.toLowerCase() === "m" && selection?.type === "component") {
         mirrorComponent(selection.id);
+      } else if (!e.ctrlKey && !e.metaKey && !e.altKey && (e.key === "+" || e.key === "=")) {
+        if ((e.target as HTMLElement)?.tagName === "INPUT") return;
+        zoomIn();
+      } else if (!e.ctrlKey && !e.metaKey && !e.altKey && (e.key === "-" || e.key === "_")) {
+        if ((e.target as HTMLElement)?.tagName === "INPUT") return;
+        zoomOut();
+      } else if (!e.ctrlKey && !e.metaKey && !e.altKey && (e.key === "0" || e.key.toLowerCase() === "f")) {
+        if ((e.target as HTMLElement)?.tagName === "INPUT") return;
+        fitToContent();
       } else if (e.key === "Escape") {
         cancelWire();
         select(null);
@@ -67,7 +86,14 @@ export function SchematicCanvas() {
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [selection, deleteSelected, rotateComponent, mirrorComponent, cancelWire, select]);
+  }, [selection, deleteSelected, rotateComponent, mirrorComponent, cancelWire, select, zoomIn, zoomOut, fitToContent]);
+
+  // A freshly loaded or generated circuit (the canvas remounts per scene)
+  // starts centred and fitted. Read once on mount via the store snapshot.
+  useEffect(() => {
+    if (useCircuitStore.getState().components.length > 0) fitToContent();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // --- drop from palette ---
   const onDrop = useCallback(
@@ -250,14 +276,6 @@ export function SchematicCanvas() {
     return m;
   }, [simResult]);
 
-  /** Maximum signed node voltage — used as the top of the color scale.
-   *  Ground is 0 V, so we only care about the highest positive potential. */
-  const maxVoltage = useMemo(() => {
-    return Array.from(nodeVoltageMap.values()).reduce(
-      (max, v) => Math.max(max, v),
-      0
-    );
-  }, [nodeVoltageMap]);
 
   /**
    * Per-wire: { currentAmperes, currentDirection, avgVoltage }
@@ -318,6 +336,24 @@ export function SchematicCanvas() {
     return result;
   }, [wires, pinNetMap, nodeVoltageMap, branchMap]);
 
+  /** Is this pin the + (higher-potential) end of its part? null when the
+   *  part has no voltage across it (or isn't a two-pin part). */
+  const pinPolarity = useCallback(
+    (componentId: string, pinId: string): VoltageEnd | undefined => {
+      const b = branchMap.get(componentId);
+      const c = components.find((x) => x.id === componentId);
+      if (!b || !c || Math.abs(b.delta_v) < 1e-3) return undefined;
+      const pins = getDef(c.kind).pins;
+      if (pins.length < 2) return undefined;
+      const idx = pins.findIndex((p) => p.id === pinId);
+      if (idx < 0) return undefined;
+      // delta_v = V(pin 0) − V(pin 1)
+      const isPlus = idx === 0 ? b.delta_v > 0 : b.delta_v < 0;
+      return isPlus ? "into" : "out";
+    },
+    [branchMap, components]
+  );
+
   /** Node voltage labels: collect all pin positions with known voltages and orientations */
   const nodeLabels = useMemo(() => {
     if (!simResult?.branch_analysis) return [];
@@ -352,6 +388,7 @@ export function SchematicCanvas() {
   }, [analysisActive, showAllBadges, toggledBadgeIds, components]);
 
   return (
+    <>
     <svg
       ref={svgRef}
       width="100%"
@@ -373,6 +410,9 @@ export function SchematicCanvas() {
 
       <g transform={`translate(${view.panX}, ${view.panY}) scale(${view.zoom})`}>
         <rect x={-4000} y={-4000} width={8000} height={8000} fill="url(#grid-dots)" />
+
+        {/* Everything drawn for the circuit; measured by "Fit to circuit". */}
+        <g ref={contentRef}>
 
         {/* ── Raw wire segments from loaded netlist JSON ─── */}
         {rawWireSegments.length > 0 && (
@@ -429,7 +469,16 @@ export function SchematicCanvas() {
               currentAmperes={analysisActive ? analysis?.currentAmperes : undefined}
               currentDirection={analysisActive ? analysis?.currentDirection : undefined}
               avgVoltage={analysisActive ? analysis?.avgVoltage : undefined}
-              maxVoltage={analysisActive ? maxVoltage : undefined}
+              showFlow={display.currentDirection}
+              voltageArrows={
+                analysisActive && display.voltageDirection
+                  ? {
+                      start: pinPolarity(w.from.componentId, w.from.pinId),
+                      end: pinPolarity(w.to.componentId, w.to.pinId),
+                    }
+                  : undefined
+              }
+              labelMode={analysisActive ? display.wireLabels : "off"}
               showCurrentLabel={
                 analysisActive &&
                 (
@@ -455,15 +504,19 @@ export function SchematicCanvas() {
             key={c.id}
             component={c}
             branchInfo={analysisActive ? branchMap.get(c.id) : undefined}
+            showLabels={display.componentLabels}
             showBranchBadge={analysisActive && (badgeVisibleIds?.has(c.id) ?? false)}
             onToggleBranchBadge={analysisActive ? () => toggleComponentBadge(c.id) : undefined}
             selected={selection?.type === "component" && selection.id === c.id}
             hoveredPin={hoveredPin?.componentId === c.id ? hoveredPin.pinId : null}
             onPointerDownBody={startBodyDrag(c.id)}
+            inspectable={inspectMode && analysisActive && branchMap.has(c.id)}
             onClickBody={(e) => {
               e.stopPropagation();
+              // With the toolbar eye on, a click (not a drag) shows / hides the
+              // part's voltage and current; otherwise it only selects.
               if (isDraggingComponent.current) return;
-              if (analysisActive && branchMap.has(c.id)) {
+              if (inspectMode && analysisActive && branchMap.has(c.id)) {
                 toggleComponentBadge(c.id);
               }
             }}
@@ -479,11 +532,29 @@ export function SchematicCanvas() {
         {analysisActive && (
           <AnalysisOverlay
             nodeLabels={nodeLabels}
-            maxVoltage={maxVoltage}
             visibleComponentIds={badgeVisibleIds}
           />
         )}
+        </g>
       </g>
     </svg>
+
+    <div className="zoom-controls" role="toolbar" aria-label="Canvas zoom">
+      <button className="zoom-btn" onClick={zoomOut} disabled={view.zoom <= MIN_ZOOM + 1e-6}
+        title="Zoom out (−)" aria-label="Zoom out">−</button>
+      <button className="zoom-level" onClick={fitToContent}
+        title="Fit circuit to canvas (F or 0)">{Math.round(view.zoom * 100)}%</button>
+      <button className="zoom-btn" onClick={zoomIn} disabled={view.zoom >= MAX_ZOOM - 1e-6}
+        title="Zoom in (+)" aria-label="Zoom in">+</button>
+      <button className="zoom-btn zoom-fit" onClick={fitToContent}
+        title="Fit circuit to canvas (F or 0)" aria-label="Fit circuit to canvas">
+        <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor"
+          strokeWidth="1.5" strokeLinecap="round" aria-hidden="true">
+          <path d="M1 5V1h4M9 1h4v4M13 9v4H9M5 13H1V9" />
+          <rect x="4.5" y="4.5" width="5" height="5" rx="0.5" />
+        </svg>
+      </button>
+    </div>
+    </>
   );
 }

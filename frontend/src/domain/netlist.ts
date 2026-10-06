@@ -18,6 +18,8 @@ export interface Netlist {
   nets: string[];
 }
 
+const SOURCE_KINDS = new Set<string>(["vsource_dc", "vsource_ac", "battery", "vsource_dep"]);
+
 /** Union-find over "componentId:pinId" keys, merged by wires, so every
  *  electrically-connected group of pins collapses into one net name.
  *  Any pin touching a `ground` component's pin is forced onto net "0",
@@ -59,6 +61,18 @@ export function buildNetlist(
   for (const c of components) {
     if (c.kind === "ground") {
       groundRoots.add(find(key(c.id, "p1")));
+    }
+  }
+  // No ground drawn: use a hidden default reference so the circuit can
+  // still be simulated. Tie the negative terminal of the first source to
+  // "0" (the usual choice), falling back to the first device's last pin.
+  if (groundRoots.size === 0) {
+    const devices = components.filter((c) => c.kind !== "ground");
+    const source = devices.find((c) => SOURCE_KINDS.has(c.kind));
+    const anchor = source ?? devices[0];
+    if (anchor) {
+      const pins = getDef(anchor.kind).pins;
+      groundRoots.add(find(key(anchor.id, pins[pins.length - 1].id)));
     }
   }
   for (const root of groundRoots) rootToName.set(root, "0");

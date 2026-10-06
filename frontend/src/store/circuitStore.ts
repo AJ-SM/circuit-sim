@@ -35,6 +35,29 @@ export interface PendingWire {
   cursor: { x: number; y: number };
 }
 
+export type WireLabelMode = "off" | "current" | "voltage" | "both";
+
+/** What the canvas draws on top of the schematic after a simulation. */
+export interface DisplayOptions {
+  /** Flow arrows and moving dashes along wires that carry current. */
+  currentDirection: boolean;
+  /** Colour wires by potential, high (warm) to low (cool). */
+  voltageDirection: boolean;
+  /** Value tag on every wire. */
+  wireLabels: WireLabelMode;
+  /** Ref and value text next to each component. */
+  componentLabels: boolean;
+}
+
+// On-wire overlays start hidden; values are opened per part with its eye
+// icon, or switched on for every wire from the Display section.
+export const DEFAULT_DISPLAY: DisplayOptions = {
+  currentDirection: false,
+  voltageDirection: false,
+  wireLabels: "off",
+  componentLabels: true,
+};
+
 interface CircuitState {
   components: ComponentInstance[];
   wires: Wire[];
@@ -61,6 +84,11 @@ interface CircuitState {
   toggleComponentBadge: (id: string) => void;
   setShowAllBadges: (show: boolean) => void;
   clearToggledBadges: () => void;
+  /** Toolbar eye: while on, clicking a part shows / hides its V and I. */
+  inspectMode: boolean;
+  setInspectMode: (on: boolean) => void;
+  display: DisplayOptions;
+  setDisplay: (patch: Partial<DisplayOptions>) => void;
 
   addComponent: (kind: ComponentKind, x: number, y: number) => void;
   moveComponent: (id: string, x: number, y: number) => void;
@@ -119,6 +147,11 @@ export const useCircuitStore = create<CircuitState>((set, get) => ({
     }),
   setShowAllBadges: (show: boolean) => set({ showAllBadges: show }),
   clearToggledBadges: () => set({ toggledBadgeIds: [] }),
+  inspectMode: false,
+  // Turning the eye off also closes any stats opened with it.
+  setInspectMode: (on) => set(on ? { inspectMode: true } : { inspectMode: false, toggledBadgeIds: [] }),
+  display: DEFAULT_DISPLAY,
+  setDisplay: (patch) => set((s) => ({ display: { ...s.display, ...patch } })),
 
   addComponent: (kind, x, y) => {
     const def = getDef(kind);
@@ -267,6 +300,10 @@ export const useCircuitStore = create<CircuitState>((set, get) => ({
     set({ simStatus: "running", simError: null });
     try {
       const result = await runSimulation(netlist, simConfig);
+      if (!result.ok) {
+        set({ simStatus: "error", simResult: null, simError: result.message ?? "Simulation failed." });
+        return;
+      }
       set({ simStatus: "done", simResult: result });
     } catch (err) {
       set({

@@ -187,6 +187,28 @@ def detect_boxes(image: np.ndarray, rotations: bool = True) -> list:
     return boxes
 
 
+def box_to_json(b) -> dict:
+    """Serialise a detected box for the frontend; `poly` (rotated views only)
+    is kept so the box can be sent back to recognize() unchanged."""
+    d = {"type": b.cls_name, "conf": round(b.conf, 3),
+         "bbox": {"x1": b.x1, "y1": b.y1, "x2": b.x2, "y2": b.y2}}
+    poly = getattr(b, "poly", None)
+    if poly is not None:
+        d["poly"] = poly.tolist()
+    return d
+
+
+def box_from_json(d: dict):
+    """Inverse of box_to_json."""
+    from wire_detector import BoundingBox
+    bb = d["bbox"]
+    b = BoundingBox(x1=int(bb["x1"]), y1=int(bb["y1"]), x2=int(bb["x2"]), y2=int(bb["y2"]),
+                    cls_name=str(d["type"]), conf=float(d["conf"]))
+    if d.get("poly") is not None:
+        b.poly = np.asarray(d["poly"], dtype=np.int32).reshape(-1, 2)
+    return b
+
+
 def _rename(components, conn_result, topology, names: dict[str, str]) -> None:
     """Give components their drawn reference designators ({old id: name}).
     Unnamed parts keep their id unless a drawn name took it, in which case
@@ -228,15 +250,18 @@ def _rename(components, conn_result, topology, names: dict[str, str]) -> None:
                                    int(re.sub(r"\D", "", c.component_id) or 0)))
 
 
-def recognize(image: np.ndarray, title: str = "drawn-circuit") -> dict:
-    """Run the full pipeline and return the netlist JSON dict."""
+def recognize(image: np.ndarray, title: str = "drawn-circuit", boxes: list | None = None) -> dict:
+    """Run the full pipeline and return the netlist JSON dict. `boxes` are
+    detections already made on this image (run-time processing); when given,
+    detection is skipped."""
     from netlist_generator import NetlistGenerator
     from drawn_topology    import DrawnTopology
     from value_reader      import (assign_designators, assign_values, format_spice,
                                    parse_item, read_designators, run_ocr)
 
     # ── 1. Component detection ──────────────────────────────────
-    boxes = detect_boxes(image)
+    if boxes is None:
+        boxes = detect_boxes(image)
 
     if not boxes:
         raise RecognitionError(

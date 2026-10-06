@@ -79,7 +79,11 @@ export function DrawCircuitOverlay({ onClose, pickImageOnOpen }: DrawCircuitOver
   const [rtp, setRtp] = useState(false);
   /** Bumped on every change to the ink, so stale RTP results are ignored. */
   const [drawVersion, setDrawVersion] = useState(0);
-  const [detections, setDetections] = useState<{ items: Detection[]; scale: number } | null>(null);
+  /** Latest RTP result, with the exact image and ink version it was made on
+   *  so "Place circuit" can reuse it instead of detecting again. */
+  const [detections, setDetections] = useState<
+    { items: Detection[]; scale: number; version: number; png: string } | null
+  >(null);
   const [detecting, setDetecting] = useState(false);
   /** Full circuit recognised in the background for the current drawing. */
   const prefetchRef = useRef<{ version: number; result: Promise<JsonNetlist> } | null>(null);
@@ -97,18 +101,20 @@ export function DrawCircuitOverlay({ onClose, pickImageOnOpen }: DrawCircuitOver
       const k = exportScale();
       const png = exportForModel();
       setDetecting(true);
-      // Recognise the whole circuit in the background too, so placing it
-      // afterwards is instant.
-      // Only one at a time: OCR is slow and the server would queue them up.
-      if (!prefetchBusyRef.current) {
-        prefetchBusyRef.current = true;
-        const result = generateCircuitFromImage(png);
-        result.catch(() => {}).finally(() => (prefetchBusyRef.current = false));
-        prefetchRef.current = { version, result };
-      }
       try {
         const items = await detectComponents(png, abort.signal);
-        if (!abort.signal.aborted) setDetections({ items, scale: k });
+        if (abort.signal.aborted) return;
+        setDetections({ items, scale: k, version, png });
+        // Recognise the whole circuit in the background from these same
+        // detections, so placing it afterwards is instant and the model
+        // isn't run a second time.
+        // Only one at a time: OCR is slow and the server would queue them up.
+        if (items.length > 0 && !prefetchBusyRef.current) {
+          prefetchBusyRef.current = true;
+          const result = generateCircuitFromImage(png, undefined, items);
+          result.catch(() => {}).finally(() => (prefetchBusyRef.current = false));
+          prefetchRef.current = { version, result };
+        }
       } catch {
         /* aborted by newer ink, or backend unreachable: keep last boxes */
       } finally {
@@ -295,11 +301,17 @@ export function DrawCircuitOverlay({ onClose, pickImageOnOpen }: DrawCircuitOver
     setStatus("generating");
     setError(null);
     try {
+      // With RTP on, reuse what was already recognised for this exact ink:
+      // the finished background result if there is one, otherwise the
+      // detected components (skipping detection on the server).
       const pre = prefetchRef.current;
+      const det = rtp && !image && detections?.version === drawVersion ? detections : null;
       const netlist =
         rtp && !image && pre && pre.version === drawVersion
           ? await pre.result
-          : await generateCircuitFromImage(image ?? exportForModel());
+          : det && det.items.length > 0
+            ? await generateCircuitFromImage(det.png, undefined, det.items)
+            : await generateCircuitFromImage(image ?? exportForModel());
       if (!netlist.components?.length) {
         throw new Error(
           "The model found symbols but couldn't connect them into a circuit. " +
@@ -314,10 +326,9 @@ export function DrawCircuitOverlay({ onClose, pickImageOnOpen }: DrawCircuitOver
           `Circuit generated.\n\nThese detected parts aren't drawable on the canvas yet and were skipped:\n  ${skipped.join(", ")}`
         );
       }
-      // If the placed circuit contains a ground, trigger simulation automatically so
-      // current flow and directions animate immediately without cluttering the screen with badges.
-      const currentComponents = useCircuitStore.getState().components;
-      if (currentComponents.some((c) => c.kind === "ground")) {
+      // Simulate right away so current flow animates immediately; a hidden
+      // default ground is used when the circuit has none.
+      if (useCircuitStore.getState().components.length > 0) {
         runSimulate().catch(() => {});
       }
       onClose();

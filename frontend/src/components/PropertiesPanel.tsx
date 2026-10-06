@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useCircuitStore } from "../store/circuitStore";
 import { getDef } from "../domain/componentDefs";
+import { PanelSection } from "./PanelSection";
 import { formatSIValue, parseSIValue } from "../utils/units";
 
 export function PropertiesPanel() {
@@ -13,13 +14,12 @@ export function PropertiesPanel() {
 
   if (selection?.type !== "component") {
     return (
-      <div className="panel-section">
-        <div className="panel-title">Properties</div>
+      <PanelSection id="properties" title="Properties">
         <p className="hint-text">
           Select a component to edit its value, or a wire to delete it.
           Drag from the pin edge of a part to draw a connection.
         </p>
-      </div>
+      </PanelSection>
     );
   }
 
@@ -28,10 +28,10 @@ export function PropertiesPanel() {
   const def = getDef(component.kind);
 
   return (
-    <div className="panel-section">
-      <div className="panel-title">
-        {def.label} <span className="ref-badge">{component.refId}</span>
-      </div>
+    <PanelSection
+      id="properties"
+      title={<>{def.label} <span className="ref-badge">{component.refId}</span></>}
+    >
 
       {def.params.map((p) => (
         <ParamField
@@ -57,7 +57,7 @@ export function PropertiesPanel() {
       <button className="btn btn-danger" onClick={deleteSelected}>
         Delete
       </button>
-    </div>
+    </PanelSection>
   );
 }
 

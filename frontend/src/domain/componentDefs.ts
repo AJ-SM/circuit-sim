@@ -151,8 +151,10 @@ export const PALETTE_ORDER: ComponentKind[] = [
   "vsource_dc",
   "vsource_ac",
   "battery",
-  "vsource_dep",
-  "diode",
+  // Hidden from the palette for now; their defs stay so loaded or
+  // generated circuits that contain them still work.
+  // "vsource_dep",
+  // "diode",
   "ground",
 ];
 

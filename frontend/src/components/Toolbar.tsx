@@ -2,6 +2,8 @@ import { useRef } from "react";
 import { useCircuitStore } from "../store/circuitStore";
 import type { JsonNetlist } from "../utils/loadNetlistJson";
 import type { ViewMode } from "../App";
+import { RunSimulationButton } from "./RunSimulationButton";
+import { InspectToggle } from "./InspectToggle";
 
 interface ToolbarProps {
   viewMode: ViewMode;
@@ -55,8 +57,7 @@ export function Toolbar({ viewMode, onViewModeChange, drawing, onDrawClick, onLo
           );
         }
 
-        const currentComponents = useCircuitStore.getState().components;
-        if (currentComponents.some((c) => c.kind === "ground")) {
+        if (useCircuitStore.getState().components.length > 0) {
           runSimulate().catch(() => {});
         }
       } catch {
@@ -140,6 +141,10 @@ export function Toolbar({ viewMode, onViewModeChange, drawing, onDrawClick, onLo
         >
           Load Netlist
         </button>
+
+        <RunSimulationButton />
+
+        <InspectToggle />
 
         <button
           className="btn"

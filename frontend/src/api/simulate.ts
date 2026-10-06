@@ -1,8 +1,9 @@
 ﻿import type { Netlist } from "../domain/netlist";
 import type { SimulationConfig } from "../domain/simulationConfig";
+import { BACKEND_ORIGIN } from "./backendOrigin";
 
 export const SIMULATE_ENDPOINT =
-  import.meta.env.VITE_SIMULATE_URL ?? "http://localhost:8000/simulate";
+  import.meta.env.VITE_SIMULATE_URL ?? `${BACKEND_ORIGIN}/simulate`;
 
 export interface SimulateRequest {
   netlist: Netlist;

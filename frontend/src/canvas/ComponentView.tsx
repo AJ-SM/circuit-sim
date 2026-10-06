@@ -18,6 +18,10 @@ interface Props {
   isPinConnected: (pinId: string) => boolean;
   /** NEW (optional): branch analysis result for this component from last simulation */
   branchInfo?: BranchInfo | null;
+  /** Inspect (eye) mode is on and this part has results: a click shows its stats. */
+  inspectable?: boolean;
+  /** Ref-id and value text beside the symbol. */
+  showLabels?: boolean;
   /** Whether the branch analysis badge should be displayed */
   showBranchBadge?: boolean;
   /** Callback when user clicks to toggle the branch badge */
@@ -30,6 +34,7 @@ interface Props {
 
 export function ComponentView({
   component,
+  showLabels = true,
   selected,
   hoveredPin,
   onPointerDownBody,
@@ -39,6 +44,7 @@ export function ComponentView({
   onPinPointerLeave,
   isPinConnected,
   branchInfo,
+  inspectable = false,
   showBranchBadge = false,
   onToggleBranchBadge,
   onClickBody,
@@ -50,7 +56,7 @@ export function ComponentView({
   const cy = component.y * GRID_SIZE;
   const scaleX = (component.mirrored ? -1 : 1) * axisScale(component.rotation);
 
-  const stroke = selected ? "var(--amber)" : "var(--text-primary)";
+  const stroke = selected ? "var(--select)" : "var(--text-primary)";
 
   const valueLabel = useMemo(() => {
     const p = def.params[0];
@@ -68,7 +74,7 @@ export function ComponentView({
         transform={`rotate(${component.rotation}) scale(${scaleX}, 1)`}
         onPointerDown={onPointerDownBody}
         onClick={onClickBody}
-        style={{ cursor: branchInfo ? "pointer" : "grab" }}
+        style={{ cursor: inspectable ? "pointer" : "grab" }}
       >
         {selected && (
           <rect
@@ -76,7 +82,7 @@ export function ComponentView({
             y={-def.size.h * GRID_SIZE * 0.9}
             width={def.size.w * GRID_SIZE * 1.1}
             height={def.size.h * GRID_SIZE * 1.8}
-            fill="rgba(255,180,84,0.08)"
+            fill="rgba(77,163,255,0.08)"
             stroke="none"
             rx={6}
           />
@@ -125,32 +131,32 @@ export function ComponentView({
       </g>
 
       {/* ref-id label */}
-      <text
+      {showLabels && <text
         x={0}
         y={-def.size.h * GRID_SIZE * 0.75 - 6}
         textAnchor="middle"
         fontSize={11}
         fill="var(--text-primary)"
-        fontFamily="var(--font-mono)"
+        fontFamily="var(--font-label)"
       >
         {component.refId}
-      </text>
+      </text>}
 
       {/* value label */}
-      {valueLabel && (
+      {showLabels && valueLabel && (
         <text
           x={0}
           y={-def.size.h * GRID_SIZE * 0.75 + 10}
           textAnchor="middle"
           fontSize={10}
           fill="var(--text-dim)"
-          fontFamily="var(--font-mono)"
+          fontFamily="var(--font-label)"
         >
           {valueLabel}
         </text>
       )}
 
-      {/* ── simulation analysis badge (toggled on demand) ── */}
+      {/* ── simulation analysis badge (toggled by clicking with the eye on) ── */}
       {showBranchBadge && branchInfo && (() => {
         const dv = branchInfo.delta_v;
         const ia = branchInfo.current_a;
@@ -180,7 +186,7 @@ export function ComponentView({
           dir === "a_to_b" ? "→" :
           dir === "b_to_a" ? "←" : "·";
         // Amber for active flow, gray for no current
-        const dirColor = dir === "none" ? "#64748b" : "#ffb454";
+        const dirColor = dir === "none" ? "#64748b" : "var(--sim-current)";
 
         // Popup alignment relative to component bounds:
         // - Horizontal components: centered directly beneath the component body
@@ -217,44 +223,39 @@ export function ComponentView({
             style={{ cursor: "pointer" }}
           >
             <title>Click to hide measurements</title>
-            {/* glow halo */}
-            <rect x={bx - 2} y={by - 2} width={bw + 4} height={bh + 4}
-              rx={7} fill="rgba(110,255,176,0.08)"
-              style={{ filter: "blur(6px)" }}
-            />
             {/* main card */}
             <rect x={bx} y={by} width={bw} height={bh}
-              rx={5}
-              fill="rgba(6,10,8,0.95)"
-              stroke="rgba(110,255,176,0.3)"
+              rx={3}
+              fill="#23272c"
+              stroke="#454c55"
               strokeWidth={1}
             />
             {/* left accent bar */}
             <rect x={bx} y={by} width={3} height={bh}
-              rx={2} fill="#6effb0" opacity={0.7}
+              rx={1} fill="var(--text-faint)"
             />
 
             {/* ΔV row */}
             <text x={bx + 10} y={by + 14}
-              fontSize={9} fontFamily="var(--font-mono)"
-              fontWeight={600} fill="#6cb6ff">
+              fontSize={9} fontFamily="var(--font-label)"
+              fontWeight={600} fill="var(--sim-voltage)">
               {"ΔV"}
             </text>
             <text x={bx + 28} y={by + 14}
-              fontSize={9} fontFamily="var(--font-mono)"
-              fontWeight={700} fill="#c8e6ff">
+              fontSize={9} fontFamily="var(--font-label)"
+              fontWeight={700} fill="var(--sim-voltage)">
               {dvText}
             </text>
 
             {/* I row */}
             <text x={bx + 10} y={by + 28}
-              fontSize={9} fontFamily="var(--font-mono)"
-              fontWeight={600} fill="#ffb454">
+              fontSize={9} fontFamily="var(--font-label)"
+              fontWeight={600} fill="var(--sim-current)">
               {"I"}
             </text>
             <text x={bx + 22} y={by + 28}
-              fontSize={9} fontFamily="var(--font-mono)"
-              fontWeight={700} fill="#ffe0a0">
+              fontSize={9} fontFamily="var(--font-label)"
+              fontWeight={700} fill="var(--sim-current)">
               {iaText}
             </text>
 
@@ -266,7 +267,7 @@ export function ComponentView({
             />
             <text x={bx + bw - 10} y={by + 28}
               textAnchor="middle"
-              fontSize={10} fontFamily="var(--font-mono)"
+              fontSize={10} fontFamily="var(--font-label)"
               fontWeight={900} fill={dirColor}>
               {dirArrow}
             </text>
@@ -274,7 +275,7 @@ export function ComponentView({
             {/* close x icon */}
             <text x={bx + bw - 7} y={by + 9}
               textAnchor="middle"
-              fontSize={9} fontFamily="var(--font-mono)"
+              fontSize={9} fontFamily="var(--font-label)"
               fill="#64748b" opacity={0.7}>
               {"×"}
             </text>

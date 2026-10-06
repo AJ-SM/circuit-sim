@@ -228,9 +228,9 @@
 }
 
 .result-ok {
-  border-color: #2f6b45;
-  background: rgba(63, 185, 120, 0.1);
-  color: #6fdc9c;
+  border-color: #3d6e4e;
+  background: rgba(90, 169, 116, 0.08);
+  color: #8cc9a0;
 }
 
 .result-error {
@@ -575,7 +575,7 @@
 
 /* --- Branch Analysis & Annotations --- */
 .component-badge {
-  font-family: var(--font-mono, monospace);
+  font-family: var(--font-label);
   font-size: 10px;
   font-weight: 600;
   user-select: none;
@@ -591,13 +591,14 @@
 .component-badge-text-i { fill: #4ade80; }
 
 /* Animated Wire Current Flow */
+/* Offsets are one full dash period (24px) so the loop has no jump. */
 @keyframes wireFlowAnim {
-  from { stroke-dashoffset: 20; }
+  from { stroke-dashoffset: 24; }
   to   { stroke-dashoffset: 0;  }
 }
 @keyframes wireFlowReverseAnim {
   from { stroke-dashoffset: 0;  }
-  to   { stroke-dashoffset: 20; }
+  to   { stroke-dashoffset: 24; }
 }
 .wire-flow-forward  { animation: wireFlowAnim        var(--flow-speed, 0.8s) linear infinite; }
 .wire-flow-reverse  { animation: wireFlowReverseAnim var(--flow-speed, 0.8s) linear infinite; }
@@ -628,8 +629,8 @@
 }
 .branch-table tr:last-child td { border-bottom: none; }
 .branch-table tr:hover td { background: rgba(255,255,255,0.02); }
-.branch-table .val-v   { color: #38bdf8; font-family: var(--font-mono); }
-.branch-table .val-i   { color: #4ade80; font-family: var(--font-mono); }
+.branch-table .val-v   { color: var(--sim-voltage); font-family: var(--font-label); }
+.branch-table .val-i   { color: var(--sim-current); font-family: var(--font-label); }
 .branch-table .val-dir { color: #fbbf24; font-weight: 500; }
 
 /* Scrollable table wrapper */
@@ -679,7 +680,7 @@
 }
 
 .node-id {
-  font-family: var(--font-mono);
+  font-family: var(--font-label);
   font-size: 9px;
   font-weight: 700;
   color: #64748b;
@@ -688,7 +689,7 @@
 }
 
 .node-v {
-  font-family: var(--font-mono);
+  font-family: var(--font-label);
   font-size: 11px;
   font-weight: 600;
   line-height: 1.1;
@@ -700,3 +701,319 @@
   pointer-events: none;
 }
 
+
+/* -- Display toggles (right sidebar) -- */
+.display-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-family: var(--font-ui);
+  font-size: 12px;
+  color: var(--ui-text);
+  cursor: pointer;
+}
+
+.display-toggle .view-toggle-btn {
+  padding: 2px 7px;
+}
+
+.display-toggle-label {
+  min-width: 0;
+}
+
+.display-switch {
+  appearance: none;
+  flex: none;
+  position: relative;
+  width: 28px;
+  height: 15px;
+  margin: 0;
+  border: 1px solid var(--ui-btn-border);
+  border-radius: 8px;
+  background: var(--ui-island-alt);
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+.display-switch::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--ui-text-faint);
+  transition: transform 0.12s ease, background 0.12s ease;
+}
+
+.display-switch:checked {
+  background: var(--ui-accent-strong);
+  border-color: var(--ui-hover-border);
+}
+
+.display-switch:checked::after {
+  transform: translateX(13px);
+  background: #ffffff;
+}
+
+.display-switch:focus-visible {
+  outline: 1px solid var(--ui-accent);
+  outline-offset: 2px;
+}
+
+/* -- Canvas zoom controls (bottom-right of the schematic) -- */
+.zoom-controls {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  display: flex;
+  align-items: stretch;
+  border: 1px solid var(--ui-btn-border);
+  border-radius: var(--ui-radius);
+  background: linear-gradient(var(--ui-btn-top), var(--ui-btn-bottom));
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.45);
+  z-index: 2;
+}
+
+.zoom-btn,
+.zoom-level {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  border-radius: 0;
+  color: var(--ui-text);
+  font-family: var(--font-ui);
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+
+.zoom-btn {
+  width: 28px;
+  height: 26px;
+  font-size: 16px;
+  line-height: 1;
+}
+
+.zoom-level {
+  min-width: 48px;
+  padding: 0 6px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--ui-text-dim);
+}
+
+.zoom-controls > * + * {
+  border-left: 1px solid var(--ui-btn-border);
+}
+
+.zoom-btn:hover:not(:disabled),
+.zoom-level:hover {
+  background: var(--ui-hover);
+  color: var(--ui-text);
+}
+
+.zoom-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.zoom-btn:focus-visible,
+.zoom-level:focus-visible {
+  outline: 1px solid var(--ui-accent);
+  outline-offset: -2px;
+}
+
+.display-toggle-label .display-swatch {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 6px;
+  border-radius: 50%;
+  vertical-align: 0;
+}
+
+/* Steady, aligned digits in every readout on the schematic and panels. */
+svg text,
+.branch-table,
+.node-voltage-grid {
+  font-variant-numeric: tabular-nums;
+}
+
+/* -- Collapsible sidebar sections -- */
+.panel-toggle {
+  width: calc(100% + 20px);
+  border: none;
+  border-bottom: 1px solid var(--ui-border-light);
+  border-radius: 0;
+  text-align: left;
+  align-items: center;
+  cursor: pointer;
+}
+
+.panel-toggle:hover {
+  background: var(--ui-hover);
+}
+
+.panel-toggle:focus-visible {
+  outline: 1px solid var(--ui-accent);
+  outline-offset: -1px;
+}
+
+.panel-chevron {
+  flex: none;
+  color: var(--ui-text-dim);
+  transform: rotate(90deg);
+  transition: transform 0.12s ease;
+}
+
+.panel-section.collapsed {
+  padding-bottom: 0;
+}
+
+.panel-section.collapsed .panel-chevron {
+  transform: rotate(0deg);
+}
+
+/* -- Right sidebar tabs (Inspector / Branch Analysis) -- */
+/* Run button + tabs stay pinned while the sidebar scrolls. */
+.sidebar-head {
+  flex: none;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--ui-island-alt);
+}
+
+/* Toolbar Run Simulation. Idle: blue. Running: green. */
+.btn-run {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-width: 132px;
+  color: #ffffff;
+  background: linear-gradient(#2f80d0, #1f6fbf);
+  border-color: #3d8fd6;
+}
+
+.btn-run:hover:not(:disabled) {
+  background: linear-gradient(#3a8ddc, #2577c8);
+  border-color: #6cb6ff;
+}
+
+.btn-run:active:not(:disabled) {
+  background: linear-gradient(#1f6fbf, #2577c8);
+}
+
+.btn-run.running,
+.btn-run.running:hover:not(:disabled) {
+  background: linear-gradient(#36a35a, #2b8a4b);
+  border-color: #4cc274;
+  cursor: progress;
+}
+
+.btn-run:disabled {
+  background: var(--ui-btn-bottom);
+  border-color: var(--ui-border);
+  color: var(--ui-text-faint);
+  box-shadow: none;
+  cursor: not-allowed;
+}
+
+.run-spinner {
+  width: 11px;
+  height: 11px;
+  border: 2px solid rgba(255, 255, 255, 0.35);
+  border-top-color: #ffffff;
+  border-radius: 50%;
+  animation: run-spin 0.7s linear infinite;
+}
+
+@keyframes run-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Toolbar eye (Inspect): on = click a part to see its V and I. */
+.btn-eye {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ui-text-dim);
+}
+
+.btn-eye.active,
+.btn-eye.active:hover:not(:disabled) {
+  color: #ffffff;
+  background: var(--ui-accent-bg);
+  border-color: var(--ui-accent);
+  box-shadow: inset 1px 1px 3px rgba(0, 0, 0, 0.5);
+}
+
+.sidebar-tabs {
+  display: flex;
+  background: var(--ui-island-alt);
+  border-bottom: 1px solid var(--ui-border);
+}
+
+.sidebar-tab {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 7px 8px;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  color: var(--ui-text-dim);
+  font-family: var(--font-ui);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.sidebar-tab + .sidebar-tab {
+  border-left: 1px solid var(--ui-border-light);
+}
+
+.sidebar-tab:hover {
+  color: var(--ui-text);
+  background: var(--ui-hover);
+}
+
+.sidebar-tab.active {
+  color: var(--ui-text);
+  background: var(--ui-island);
+  border-bottom-color: var(--ui-accent);
+}
+
+.sidebar-tab:focus-visible {
+  outline: 1px solid var(--ui-accent);
+  outline-offset: -2px;
+}
+
+.sidebar-tab-count {
+  min-width: 16px;
+  padding: 0 5px;
+  border-radius: 8px;
+  background: var(--ui-accent-bg);
+  color: var(--ui-text);
+  font-size: 10px;
+  line-height: 16px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* In its own tab the table uses the full height instead of a short scroller. */
+.branch-tab {
+  padding-top: 10px;
+}
+
+.branch-tab .branch-scroll {
+  max-height: none;
+}
