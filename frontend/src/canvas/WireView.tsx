@@ -272,7 +272,7 @@ export function WireView({
           iText && { text: iText, color: flowColor },
           vText && { text: vText, color: voltColor },
         ].filter(Boolean) as { text: string; color: string }[];
-        const widths = pills.map((p) => Math.max(34, p.text.length * 5.6 + 10));
+        const widths = pills.map((p) => Math.max(40, p.text.length * 6.6 + 12));
         const gap = 3;
         const total = widths.reduce((s, w) => s + w, 0) + gap * (pills.length - 1);
         let x = -total / 2;
@@ -284,8 +284,8 @@ export function WireView({
               x += w + gap;
               return (
                 <g key={i}>
-                  <rect x={px} y={-9} width={w} height={13} rx={6.5} fill={p.color} />
-                  <text x={px + w / 2} y={1} textAnchor="middle" fontSize={8}
+                  <rect x={px} y={-11} width={w} height={16} rx={8} fill={p.color} />
+                  <text x={px + w / 2} y={1.6} textAnchor="middle" fontSize={10}
                     fontFamily="var(--font-label)" fontWeight={700} fill="var(--sim-label-ink)">
                     {p.text}
                   </text>

@@ -69,8 +69,8 @@ export function AnalysisOverlay({ nodeLabels, visibleComponentIds }: Props) {
         const isZero = Math.abs(lbl.voltage) < 0.001 || lbl.nodeId.startsWith("0:") || !!lbl.isGround;
         const text = isZero ? "0.00 V" : fmtVolts(lbl.voltage);
         const color = "var(--sim-voltage)";
-        const textW = Math.max(42, text.length * 6.5 + 14);
-        const pillH = 16;
+        const textW = Math.max(46, text.length * 6.6 + 14);
+        const pillH = 18;
         const offset = computeNodeBadgeOffset(lbl, textW);
 
         return (
@@ -86,20 +86,18 @@ export function AnalysisOverlay({ nodeLabels, visibleComponentIds }: Props) {
                 y={-pillH / 2}
                 width={textW}
                 height={pillH}
-                rx={4}
-                fill="#23272c"
-                stroke={color}
-                strokeWidth={1}
+                rx={pillH / 2}
+                fill={color}
               />
               {/* voltage text */}
               <text
                 x={0}
                 y={3.8}
                 textAnchor="middle"
-                fontSize={8.5}
+                fontSize={10.5}
                 fontFamily="var(--font-label)"
                 fontWeight={700}
-                                fill={color}
+                fill="var(--sim-label-ink)"
               >
                 {text}
               </text>

@@ -142,17 +142,17 @@ export function ComponentView({
           ? { x: -14, y: valueLabel ? -2 : 4, anchor: "end" as const }
           : { x: 0, y: top - (valueLabel ? 16 : 5), anchor: "middle" as const };
         const val = vertical
-          ? { x: -14, y: 11, anchor: "end" as const }
+          ? { x: -14, y: 12, anchor: "end" as const }
           : { x: 0, y: top - 4, anchor: "middle" as const };
         return (
           <g pointerEvents="none">
-            <text x={ref.x} y={ref.y} textAnchor={ref.anchor} fontSize={11}
-              fill="var(--text-primary)" fontFamily="var(--font-label)">
+            <text className="canvas-label" x={ref.x} y={ref.y} textAnchor={ref.anchor}
+              fontSize={12} fontWeight={600} fill="var(--label-ref)" fontFamily="var(--font-label)">
               {component.refId}
             </text>
             {valueLabel && (
-              <text x={val.x} y={val.y} textAnchor={val.anchor} fontSize={10}
-                fill="var(--text-dim)" fontFamily="var(--font-label)">
+              <text className="canvas-label" x={val.x} y={val.y} textAnchor={val.anchor}
+                fontSize={11} fontWeight={500} fill="var(--label-value)" fontFamily="var(--font-label)">
                 {valueLabel}
               </text>
             )}
@@ -199,8 +199,8 @@ export function ComponentView({
         const isVertical = component.rotation === 90 || component.rotation === 270;
         const isDiagonalRot = component.rotation % 90 !== 0;
 
-        const bw = 92;
-        const bh = 42;
+        const bw = 112;
+        const bh = 48;
 
         let bx = -bw / 2;
         let by = def.size.h * GRID_SIZE * 0.6 + 14;
@@ -240,47 +240,47 @@ export function ComponentView({
             />
 
             {/* ΔV row */}
-            <text x={bx + 10} y={by + 14}
-              fontSize={9} fontFamily="var(--font-label)"
+            <text x={bx + 10} y={by + 19}
+              fontSize={11} fontFamily="var(--font-label)"
               fontWeight={600} fill="var(--sim-voltage)">
               {"ΔV"}
             </text>
-            <text x={bx + 28} y={by + 14}
-              fontSize={9} fontFamily="var(--font-label)"
+            <text x={bx + 32} y={by + 19}
+              fontSize={11} fontFamily="var(--font-label)"
               fontWeight={700} fill="var(--sim-voltage)">
               {dvText}
             </text>
 
             {/* I row */}
-            <text x={bx + 10} y={by + 28}
-              fontSize={9} fontFamily="var(--font-label)"
+            <text x={bx + 10} y={by + 38}
+              fontSize={11} fontFamily="var(--font-label)"
               fontWeight={600} fill="var(--sim-current)">
               {"I"}
             </text>
-            <text x={bx + 22} y={by + 28}
-              fontSize={9} fontFamily="var(--font-label)"
+            <text x={bx + 32} y={by + 38}
+              fontSize={11} fontFamily="var(--font-label)"
               fontWeight={700} fill="var(--sim-current)">
               {iaText}
             </text>
 
             {/* direction chip */}
-            <rect x={bx + bw - 18} y={by + 18}
-              width={16} height={14}
+            <rect x={bx + bw - 22} y={by + 26}
+              width={18} height={16}
               rx={3} fill={dirColor} opacity={0.18}
               stroke={dirColor} strokeWidth={0.7}
             />
-            <text x={bx + bw - 10} y={by + 28}
+            <text x={bx + bw - 13} y={by + 39}
               textAnchor="middle"
-              fontSize={10} fontFamily="var(--font-label)"
+              fontSize={12} fontFamily="var(--font-label)"
               fontWeight={900} fill={dirColor}>
               {dirArrow}
             </text>
 
             {/* close x icon */}
-            <text x={bx + bw - 7} y={by + 9}
+            <text x={bx + bw - 8} y={by + 12}
               textAnchor="middle"
-              fontSize={9} fontFamily="var(--font-label)"
-              fill="#64748b" opacity={0.7}>
+              fontSize={11} fontFamily="var(--font-label)"
+              fill="var(--text-dim)">
               {"×"}
             </text>
           </g>

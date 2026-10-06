@@ -11,13 +11,15 @@
   --phosphor-dim: #3d6e4e;
   --amber: #e0a040;          /* running state, hover targets */
   --amber-dim: #8a6a3a;
-  --select: #4da3ff;         /* selected part / wire */
-  --sim-voltage: #d14fc4;    /* every voltage shown after a simulation (magenta) */
+  --select: #4da3ff;         /* selected part / wire (blue; distinct from voltage and current) */
+  --sim-voltage: #ffe680;    /* every voltage shown after a simulation (pale yellow) */
   --sim-current: #ffffff;    /* every current shown after a simulation (white) */
   --sim-label-ink: #15171a;  /* text on the solid voltage/current pills */
   --danger: #e5534b;
 
-  --text-primary: #d3d8de;   /* part outlines and ref labels */
+  --text-primary: #d3d8de;   /* part outlines */
+  --label-ref: #eef1f4;      /* part ref labels on the canvas */
+  --label-value: #c3cad2;    /* part value labels on the canvas */
   --text-dim: #8b949e;
   --text-faint: #5a626b;
 

@@ -1017,3 +1017,12 @@ svg text,
 .branch-tab .branch-scroll {
   max-height: none;
 }
+
+/* Part labels on the schematic: a thin outline in the canvas colour keeps
+   them readable where they cross grid dots or wires. */
+svg text.canvas-label {
+  paint-order: stroke;
+  stroke: var(--bg-canvas);
+  stroke-width: 3px;
+  stroke-linejoin: round;
+}
