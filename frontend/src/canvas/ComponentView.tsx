@@ -185,11 +185,14 @@ export function ComponentView({
           return `${absIa.toExponential(1)} A`;
         })();
 
-        // Direction arrow: → means current flows a→b (from p1 to p2)
-        const dirArrow =
-          dir === "a_to_b" ? "→" :
-          dir === "b_to_a" ? "←" : "·";
-        // Amber for active flow, gray for no current
+        // Direction of the current through the part, on screen: from pin a
+        // to pin b (or back), after the part's rotation and mirroring, so
+        // the arrow matches the wire arrows whichever way the part is placed.
+        const pa = transformLocal(def.pins[0].local, component.rotation, component.mirrored);
+        const pb = transformLocal((def.pins[1] ?? def.pins[0]).local, component.rotation, component.mirrored);
+        const flowAngle =
+          (Math.atan2(pb.y - pa.y, pb.x - pa.x) * 180) / Math.PI + (dir === "b_to_a" ? 180 : 0);
+        // Current colour for active flow, grey for no current
         const dirColor = dir === "none" ? "#64748b" : "var(--sim-current)";
 
         // Popup alignment relative to component bounds:
@@ -269,12 +272,14 @@ export function ComponentView({
               rx={3} fill={dirColor} opacity={0.18}
               stroke={dirColor} strokeWidth={0.7}
             />
-            <text x={bx + bw - 13} y={by + 39}
-              textAnchor="middle"
-              fontSize={12} fontFamily="var(--font-label)"
-              fontWeight={900} fill={dirColor}>
-              {dirArrow}
-            </text>
+            {dir === "none" ? (
+              <circle cx={bx + bw - 13} cy={by + 34} r={1.8} fill={dirColor} />
+            ) : (
+              <g transform={`translate(${bx + bw - 13}, ${by + 34}) rotate(${flowAngle})`}>
+                <line x1={-5} y1={0} x2={2} y2={0} stroke={dirColor} strokeWidth={1.6} />
+                <polygon points="1,-3.5 6,0 1,3.5" fill={dirColor} />
+              </g>
+            )}
 
             {/* close x icon */}
             <text x={bx + bw - 8} y={by + 12}

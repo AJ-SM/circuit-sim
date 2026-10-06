@@ -105,7 +105,7 @@ export function BranchAnalysisPanel() {
                     {fmtVolts(b.delta_v)}
                   </td>
                   <td style={{ fontFamily: "var(--font-label)", fontSize: 11, color: iColor }}>
-                    {fmtAmps(b.current_a)}
+                    {fmtAmps(Math.abs(b.current_a))}
                   </td>
                   <td>
                     <DirectionCell b={b} />

@@ -29,6 +29,26 @@ from pydantic import BaseModel
 
 app = FastAPI(title="Circuit Simulator Backend")
 
+
+@app.on_event("startup")
+def _warm_up_models() -> None:
+    """Load YOLO and the OCR models in the background as the server starts,
+    so the first drawing doesn't also pay for loading them (~15 s)."""
+    import threading
+
+    def load() -> None:
+        try:
+            import numpy as np
+            import recognizer
+            import value_reader
+            recognizer.detect_boxes(np.full((320, 320, 3), 255, np.uint8))
+            value_reader.warm_up()
+            print("[circuit-backend] models loaded")
+        except Exception as exc:
+            print(f"[circuit-backend] model warm-up skipped: {exc}")
+
+    threading.Thread(target=load, daemon=True).start()
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -175,6 +195,7 @@ def _build_spice_deck(netlist: Netlist, ac_freq: float | None) -> _Deck:
     deck.nodes = sorted(n for n in nodes if n != "0")
     vectors = deck.vectors()
     lines.append(".control")
+    lines.append("set numdgt=12")    # print enough digits for exact KCL / power balance
     if ac_freq is None:
         lines.append("op")
         cmd = " ".join(vectors)
@@ -277,12 +298,15 @@ def _compute_branch_analysis(netlist: Netlist, deck: _Deck, values: dict[str, co
 
     1. Node voltages are relative to ground (node "0" = 0 V).
     2. Small numerical noise near zero is clamped to 0 V.
-    3. Passive sign convention: delta_v = V(node_a) - V(node_b); current is
-       the true current through the part (from its series sense source),
-       positive when it flows a->b.
-    4. Voltage sources: ngspice's v#branch is the current INTO the positive
-       terminal. It is negated to give the conventional current that EXITS
-       the positive terminal into the circuit.
+    3. One sign convention for every part (passive sign convention):
+       delta_v = V(node_a) - V(node_b), and current_a is the conventional
+       current flowing THROUGH the part from pin a to pin b (positive a->b).
+       Passive parts read it from their series sense source.
+    4. Voltage sources use the same convention: ngspice's v#branch is
+       already the current through the source from + (pin a) to - (pin b).
+       A source delivering power therefore reports a negative current
+       (direction b_to_a: inside the source current rises from - to +, and
+       it leaves the + terminal into the circuit).
     5. AC (sinusoidal steady state): voltages and currents are peak
        amplitudes; the sign gives the direction relative to the source phase.
     """
@@ -307,9 +331,9 @@ def _compute_branch_analysis(netlist: Netlist, deck: _Deck, values: dict[str, co
         dv = _signed(za - zb)
         if abs(dv) < _ZERO_SNAP:
             dv = 0.0
-        br, is_source = deck.branch[idx]
+        br, _ = deck.branch[idx]
         i = values.get(f"{br}#branch", 0j)
-        current = _signed(-i if is_source else i)
+        current = _signed(i)
         # ngspice's GMIN leakage (~1e-12 S per node) shows up as pA "currents"
         # in branches that really carry none (e.g. behind a capacitor at DC).
         if abs(current) < _CURRENT_SNAP:

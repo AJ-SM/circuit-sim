@@ -9,3 +9,6 @@ scikit-image
 # optional handwriting second reader for values (TrOCR, ~250 MB download on first use)
 transformers
 sentencepiece
+# faster OCR text detection on CPU (optional; falls back to torch without them)
+onnxruntime
+onnx

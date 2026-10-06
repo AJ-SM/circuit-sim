@@ -53,8 +53,11 @@ _UNIT_ALIASES = {
 _PREFIXES = {
     "ohm": {"k": 1e3, "K": 1e3, "M": 1e6, "m": 1e6, "G": 1e9, "g": 1e9},
     "F": {"m": 1e-3, "u": 1e-6, "U": 1e-6, "µ": 1e-6, "μ": 1e-6, "M": 1e-6,
+          "w": 1e-6, "y": 1e-6,
           "n": 1e-9, "N": 1e-9, "p": 1e-12, "P": 1e-12},
+    # pico-henries never appear on a drawn schematic: a "p" there is a µ.
     "H": {"m": 1e-3, "M": 1e-3, "u": 1e-6, "U": 1e-6, "µ": 1e-6, "μ": 1e-6,
+          "w": 1e-6, "y": 1e-6, "p": 1e-6, "P": 1e-6,
           "n": 1e-9, "N": 1e-9},
     "V": {"m": 1e-3, "k": 1e3, "K": 1e3},
 }
@@ -102,6 +105,7 @@ class OcrItem:
 # ── OCR engine ──────────────────────────────────────────────────
 
 _reader = None
+_reader_lock = threading.Lock()
 
 
 def ocr_available() -> bool:
@@ -122,6 +126,101 @@ _OCR_ALLOWLIST = "0123456789.kKmMuUnNpPvVfFhHRLCD"
 OCR_LONG_SIDE = 1650
 
 
+# ── Speed ───────────────────────────────────────────────────────
+#
+# Nearly all of the time to read a drawing is easyocr's CRAFT text detector
+# (≈6 s a pass at OCR_LONG_SIDE on CPU, two passes); recognising the boxes it
+# finds takes < 0.1 s. Measured on the test drawings, without changing a
+# single box or reading:
+#   * torch defaults to 8 of this machine's 12 threads: all cores ≈ 11 % faster.
+#   * the same CRAFT network run by ONNX Runtime ≈ 20 % faster.
+# Tried and rejected: one shared detection for both passes (2× faster but
+# drops / misreads labels), int8 CRAFT (slower here and misreads), a lower
+# OCR_LONG_SIDE (loses labels), cropping to the ink (drawings fill the frame).
+# Set VALUE_OCR_ONNX=0 to keep easyocr's own torch detector.
+
+def _use_all_cores() -> None:
+    try:
+        import torch
+        torch.set_num_threads(os.cpu_count() or 1)
+    except Exception:
+        pass
+
+
+class _OrtCraft:
+    """Drop-in for easyocr's CRAFT module: same call, same tensors back,
+    computed by ONNX Runtime."""
+    def __init__(self, session):
+        self.session = session
+
+    def __call__(self, x):
+        import torch
+        y, feature = self.session.run(None, {"x": x.detach().cpu().numpy().astype(np.float32)})
+        return torch.from_numpy(y), torch.from_numpy(feature)
+
+    def eval(self):
+        return self
+
+
+def _onnx_detector(reader):
+    """CRAFT exported to ONNX once (cached next to easyocr's weights) and
+    loaded in ONNX Runtime, or None to keep the torch detector."""
+    if os.environ.get("VALUE_OCR_ONNX", "1") == "0":
+        return None
+    try:
+        import onnxruntime as ort
+        import torch
+        net = getattr(reader.detector, "module", reader.detector).eval()
+        path = os.path.join(reader.model_storage_directory, "craft_ort.onnx")
+        if not os.path.exists(path):
+            tmp = path + ".tmp"
+            torch.onnx.export(
+                net, torch.randn(1, 3, 640, 800), tmp,
+                input_names=["x"], output_names=["y", "feature"],
+                dynamic_axes={"x": {2: "h", 3: "w"}, "y": {1: "h2", 2: "w2"},
+                              "feature": {2: "h2", 3: "w2"}},
+                opset_version=17, dynamo=False)
+            os.replace(tmp, path)
+        opts = ort.SessionOptions()
+        opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        opts.intra_op_num_threads = os.cpu_count() or 1
+        ort_net = _OrtCraft(ort.InferenceSession(path, opts, providers=["CPUExecutionProvider"]))
+        # Must agree with the torch network before it replaces it.
+        x = torch.rand(1, 3, 96, 128)
+        with torch.no_grad():
+            ref = net(x)[0].numpy()
+        if not np.allclose(ort_net(x)[0].numpy(), ref, atol=1e-3):
+            raise RuntimeError("ONNX CRAFT output differs from torch")
+        return ort_net
+    except Exception as exc:  # no onnxruntime / onnx, export failed, …
+        print(f"[value_reader] ONNX text detector unavailable, using torch: {exc}")
+        return None
+
+
+def _get_reader():
+    """The easyocr reader, built once (thread-safe) with the fast detector."""
+    global _reader
+    with _reader_lock:
+        if _reader is None:
+            import easyocr
+            _use_all_cores()
+            reader = easyocr.Reader(["en"], gpu=False, verbose=False)
+            fast = _onnx_detector(reader)
+            if fast is not None:
+                reader.detector = fast
+            _reader = reader
+    return _reader
+
+
+def warm_up() -> None:
+    """Load the OCR models now (the first request otherwise waits for them)."""
+    if not ocr_available():
+        return
+    reader = _get_reader()
+    reader.readtext(np.full((64, 160), 255, np.uint8))
+    _get_trocr()
+
+
 def run_ocr(image: np.ndarray) -> list[OcrItem]:
     """Text boxes in the image, with neighbouring words on one line merged
     ("0.7" + "mH" → "0.7mH"). Returns [] when no OCR engine is installed.
@@ -130,13 +229,10 @@ def run_ocr(image: np.ndarray) -> list[OcrItem]:
     image is resampled to a fixed working size and strokes are thickened
     before recognition. Thickening blurs small printed labels together, so
     the unthickened image is read too and the two readings merged."""
-    global _reader
     if not ocr_available():
         return []
     import cv2
-    import easyocr
-    if _reader is None:
-        _reader = easyocr.Reader(["en"], gpu=False, verbose=False)
+    reader = _get_reader()
 
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
     scale = OCR_LONG_SIDE / max(gray.shape)
@@ -147,7 +243,7 @@ def run_ocr(image: np.ndarray) -> list[OcrItem]:
     passes = []
     for img in (thick, gray):
         found = []
-        for quad, text, conf in _reader.readtext(img, allowlist=_OCR_ALLOWLIST):
+        for quad, text, conf in reader.readtext(img, allowlist=_OCR_ALLOWLIST):
             xs = [p[0] / scale for p in quad]
             ys = [p[1] / scale for p in quad]
             found.append(OcrItem(text, int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys)), float(conf)))
@@ -155,8 +251,7 @@ def run_ocr(image: np.ndarray) -> list[OcrItem]:
     items = merge_line_items(_merge_passes(*passes))
 
     orig_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
-    for it in items:
-        alt = read_handwriting(orig_gray, it)
+    for it, alt in zip(items, read_handwriting_batch(orig_gray, items)):
         if alt:
             it.alts.append(alt)
     return items
@@ -203,6 +298,44 @@ def _get_trocr():
             print(f"[value_reader] TrOCR unavailable, using easyocr only: {exc}")
             _trocr = False
     return _trocr
+
+
+def _trocr_crop(gray: np.ndarray, item: OcrItem):
+    """The label region TrOCR reads (padded vertically, scaled to
+    _TROCR_HEIGHT), or None when it is empty."""
+    import cv2
+    pad = int(_TROCR_PAD * (item.y2 - item.y1))
+    crop = gray[max(0, item.y1 - pad):item.y2 + pad, max(0, item.x1):item.x2]
+    if crop.size == 0:
+        return None
+    s = _TROCR_HEIGHT / crop.shape[0]
+    return cv2.resize(crop, None, fx=s, fy=s,
+                      interpolation=cv2.INTER_AREA if s < 1 else cv2.INTER_CUBIC)
+
+
+def read_handwriting_batch(gray: np.ndarray, items: list[OcrItem]) -> list[str | None]:
+    """TrOCR's reading of every label in one batched pass (the processor
+    resizes each crop to the same input size, so batching changes nothing but
+    the time). None where a label can't be read."""
+    out: list[str | None] = [None] * len(items)
+    if not items:
+        return out
+    with _trocr_lock:
+        trocr = _get_trocr()
+        if not trocr:
+            return out
+        from PIL import Image
+        processor, tokenizer, model = trocr
+        crops = [(i, _trocr_crop(gray, it)) for i, it in enumerate(items)]
+        crops = [(i, c) for i, c in crops if c is not None]
+        if not crops:
+            return out
+        pixels = processor(images=[Image.fromarray(c).convert("RGB") for _, c in crops],
+                           return_tensors="pt").pixel_values
+        ids = model.generate(pixels, max_new_tokens=12, num_beams=4)
+        for (i, _), text in zip(crops, tokenizer.batch_decode(ids, skip_special_tokens=True)):
+            out[i] = clean_handwriting(text)
+    return out
 
 
 def read_handwriting(gray: np.ndarray, item: OcrItem) -> str | None:
@@ -369,27 +502,90 @@ def _parse(text: str, cls_name: str | None, guess_prefix: bool = True
             number, multiplier, inferred = stripped, trailing, True
 
     value = number * multiplier
+    # Below a picofarad isn't a drawn capacitor: that "p" was a µ ("0.6pF").
+    if unit == "F" and multiplier == 1e-12 and value < lo:
+        value = number * 1e-6
     if lo <= value <= hi:
         return value, unit, inferred, 2 * (explicit == unit) - garbled
     return None, None, False, 0
 
 
+# Letters a reader writes for a handwritten µ. Neither engine was seen to
+# turn a real n / p into one of these, while both regularly turn µ into n / p
+# (easyocr "10uF" vs TrOCR "10pF"), so a µ reading wins such a disagreement.
+_MICRO_LOOKALIKES = set("uUµμwy")
+# What a handwritten Ω turns into when it is read as a digit glued onto the
+# number ("330Ω" -> "3300" / "3302", "47Ω" -> "470" / "472").
+_OHM_AS_DIGITS = set("029")
+
+
+def _digit_count(text: str) -> int:
+    m = _NUMBER_RE.match(text.replace(" ", ""))
+    return sum(ch.isdigit() for ch in m.group(1)) if m else 0
+
+
+def _prefix_letter(text: str) -> str:
+    m = _NUMBER_RE.match(text.replace(" ", ""))
+    return m.group(2)[:1] if m else ""
+
+
+def _ohm_glyph_reading(readings: list[str]) -> str | None:
+    """Two all-digit readings of a resistor label that share a stem and
+    differ only by trailing Ω look-alikes ("3300" / "3302") disagree because
+    the Ω was read as digits: the stem is the value ("330")."""
+    plain = [t for t in readings if t.isdigit()]
+    for i, a in enumerate(plain):
+        for b in plain[i + 1:]:
+            if a == b:
+                continue
+            stem = os.path.commonprefix([a, b])
+            tails = (a[len(stem):], b[len(stem):])
+            if (stem and len(stem) >= max(len(a), len(b)) - 2
+                    and all(set(t) <= _OHM_AS_DIGITS for t in tails)):
+                return stem
+    return None
+
+
 def parse_item(item: OcrItem, cls_name: str | None) -> tuple[float | None, str | None, bool]:
     """(value, unit, inferred) from the best of an item's readings for this
     class. A reading scores for its letters fitting the class (see _parse),
-    for not needing the trailing-digit guess, and for agreeing with the other engine; on a tie
-    the handwriting model wins (it is the better reader of the two)."""
-    parsed = [_parse(t, cls_name, guess_prefix=False) for t in item.alts]
-    parsed.append(_parse(item.text, cls_name))
-    parsed = [p for p in parsed if p[0] is not None]
+    for not needing the trailing-digit guess, and for agreeing with the other
+    engine. Known disagreements are settled by what each engine gets wrong
+    (measured on rendered handwriting): a µ beats an n / p for the same
+    number, a reading that kept its decimal point beats the same digits
+    without it, and a resistor's Ω read as digits is stripped. Otherwise, on
+    a tie the handwriting model wins (it is the better reader of the two)."""
+    texts = list(item.alts) + [item.text]
+    parsed = [(t, _parse(t, cls_name, guess_prefix=False)) for t in item.alts]
+    parsed.append((item.text, _parse(item.text, cls_name)))
+    if cls_name == "Resistor":
+        stem = _ohm_glyph_reading(texts)
+        if stem is not None:
+            parsed.insert(0, (stem, _parse(stem, cls_name, guess_prefix=False)))
+    parsed = [(t, p) for t, p in parsed if p[0] is not None]
     if not parsed:
         return None, None, False
 
-    def score(p):
-        agree = sum(math.isclose(p[0], q[0], rel_tol=1e-6) for q in parsed) - 1
-        return p[3] + (not p[2]) + 2 * (agree > 0)
+    values = [p[0] for _, p in parsed]
+    micro = CLASS_UNIT.get(cls_name) in ("F", "H")
 
-    value, unit, inferred, _ = max(parsed, key=score)   # max keeps the first on ties
+    def score(entry):
+        text, p = entry
+        agree = sum(math.isclose(p[0], v, rel_tol=1e-6) for v in values) - 1
+        s = p[3] + (not p[2]) + 2 * (agree > 0)
+        if micro and _prefix_letter(text) in _MICRO_LOOKALIKES:
+            s += 3
+        if "." in text and text.replace(".", "") in texts:
+            s += 1
+        if cls_name == "Resistor" and text.isdigit() and text == _ohm_glyph_reading(texts):
+            s += 3
+        # A reading that lost two or more digits the other engine saw
+        # ("10µF": easyocr "104F", TrOCR "4pyf") is missing part of the number.
+        if _digit_count(text) + 2 <= max(_digit_count(t) for t, _ in parsed):
+            s -= 2
+        return s
+
+    _, (value, unit, inferred, _) = max(parsed, key=score)   # max keeps the first on ties
     return value, unit, inferred
 
 

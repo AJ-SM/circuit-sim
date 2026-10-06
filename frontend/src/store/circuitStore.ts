@@ -291,6 +291,14 @@ export const useCircuitStore = create<CircuitState>((set, get) => ({
       simError: null,
       toggledBadgeIds: [],
       showAllBadges: false,
+      // A newly placed circuit starts with only the current animation; the
+      // other on-wire overlays are switched back off (part labels are kept).
+      display: {
+        ...s.display,
+        currentDirection: DEFAULT_DISPLAY.currentDirection,
+        voltageDirection: DEFAULT_DISPLAY.voltageDirection,
+        wireLabels: DEFAULT_DISPLAY.wireLabels,
+      },
     }));
     return skipped;
   },

@@ -9,6 +9,7 @@ import { WireView, type VoltageEnd } from "./WireView";
 import { AnalysisOverlay, buildNodeLabels } from "./AnalysisOverlay";
 import type { ComponentKind, PinRef } from "../types/circuit";
 import type { BranchInfo } from "../api/simulate";
+import { computeWireCurrents } from "../domain/currentFlow";
 
 const DOT = 1.5;
 
@@ -282,6 +283,16 @@ export function SchematicCanvas() {
    * A wire is associated with the component whose branch-analysis it
    * participates in (from-pin side, component lookup).
    */
+  const componentsById = useMemo(
+    () => new Map(components.map((c) => [c.id, c])),
+    [components]
+  );
+  /** Conventional current along every wire (see domain/currentFlow.ts). */
+  const wireCurrents = useMemo(
+    () => computeWireCurrents(wires, componentsById, branchMap),
+    [wires, componentsById, branchMap]
+  );
+
   const wireAnalysis = useMemo(() => {
     type WireInfo = {
       currentAmperes?: number;
@@ -297,44 +308,18 @@ export function SchematicCanvas() {
       const vb = toNet !== undefined ? nodeVoltageMap.get(toNet) : undefined;
       const avgV = va !== undefined && vb !== undefined ? (va + vb) / 2 : va ?? vb;
 
-      // Find branch info: look at components connected to both ends, pick the
-      // one that has both pins on this wire's nets.
-      let current: number | undefined;
-      let direction: "a_to_b" | "b_to_a" | "none" | undefined;
-
-      // Try from-component first
-      const fromBranch = branchMap.get(w.from.componentId);
-      const toBranch = branchMap.get(w.to.componentId);
-      const chosen = fromBranch ?? toBranch;
-      if (chosen) {
-        current = chosen.current_a;
-        // Direction relative to wire: if branch direction is a_to_b and the
-        // from-pin is node_a, then current flows from→to.
-        const fromIsA =
-          fromBranch &&
-          fromNet !== undefined &&
-          fromBranch.node_a === fromNet;
-        if (fromIsA) {
-          direction = chosen.direction;
-        } else {
-          // flip
-          direction =
-            chosen.direction === "a_to_b"
-              ? "b_to_a"
-              : chosen.direction === "b_to_a"
-              ? "a_to_b"
-              : "none";
-        }
-      }
+      const flow = wireCurrents.get(w.id);
+      const current = flow?.amperes;
+      const direction = flow?.direction;
 
       result.set(w.id, {
-        currentAmperes: current !== undefined ? Math.abs(current) : undefined,
+        currentAmperes: current,
         currentDirection: direction,
         avgVoltage: avgV,
       });
     }
     return result;
-  }, [wires, pinNetMap, nodeVoltageMap, branchMap]);
+  }, [wires, pinNetMap, nodeVoltageMap, wireCurrents]);
 
   /** Is this pin the + (higher-potential) end of its part? null when the
    *  part has no voltage across it (or isn't a two-pin part). */
