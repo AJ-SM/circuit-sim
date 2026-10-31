@@ -1,4 +1,13 @@
+# Backend
 /backend/circuit-sim-backend-linux-amd64.tar
 __pycache__/
 *.py[cod]
-*.txt
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.env
+frontend/.env.local
+
+# Misc
+*.stackdump
