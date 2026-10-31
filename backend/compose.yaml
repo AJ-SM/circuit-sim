@@ -1,0 +1,46 @@
+services:
+  api:
+    build: .
+    image: circuit-sim-backend:latest
+    restart: unless-stopped
+    environment:
+      CIRCUIT_QUEUE_MODE: celery
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+    ports:
+      - "${API_PORT:-18080}:8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  worker:
+    image: circuit-sim-backend:latest
+    restart: unless-stopped
+    command: ["celery", "-A", "jobs:celery_app", "worker", "--loglevel=info", "--concurrency=1"]
+    environment:
+      CIRCUIT_QUEUE_MODE: celery
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+    volumes:
+      - ocr-cache:/home/app/.paddlex
+    healthcheck:
+      disable: true
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  ocr-cache:
+  redis-data:

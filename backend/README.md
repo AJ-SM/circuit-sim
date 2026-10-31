@@ -20,6 +20,34 @@ Python/FastAPI backend for the circuit simulator. Accepts JSON netlists from the
 
 ## Running
 
+### Docker deployment
+
+From this `backend` directory on a Linux VPS with Docker Compose installed:
+
+```sh
+docker compose build
+docker compose up -d
+docker compose ps
+curl http://localhost:18080/health
+```
+
+Compose runs the API, one Celery inference worker, and Redis. It builds the
+`circuit-sim-backend:latest` image from the Dockerfile, including ngspice and
+the bundled model weights. Set `API_PORT` to change the host port (default:
+`18080`). Redis stores queued jobs in a persistent Docker volume. The worker
+downloads OCR models on first use and keeps them in the
+`ocr-cache` Docker volume. Allow enough disk space and RAM for Python, PyTorch,
+PaddleOCR, and the downloaded models.
+
+For an API-only image build, run `docker build -t circuit-sim-backend:latest .`
+from this directory. The frontend needs its API URLs set to the VPS origin
+before its production build.
+
+On Windows, `powershell -ExecutionPolicy Bypass -File .\build-image.ps1` builds
+the Linux amd64 image and saves `circuit-sim-backend-linux-amd64.tar` in this
+directory for copying. On the VPS, load it with
+`docker load -i circuit-sim-backend-linux-amd64.tar`.
+
 ```powershell
 cd circuit-backend
 pip install -r requirements.txt

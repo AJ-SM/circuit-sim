@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*.stackdump
+.env
+.env.*
+.git/
+.venv/
+venv/
+README.md
+BACKEND_SUMMARY.md
+check_solver_polarity.py
+build-image.ps1
+*.tar
+*.tar.gz
