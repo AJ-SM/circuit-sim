@@ -5,6 +5,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     OMP_NUM_THREADS=1 \
     NGSPICE_PATH=/usr/bin/ngspice \
+    PYTHONPATH=/app \
     CIRCUIT_MODEL_DIR=/app/model
 
 RUN apt-get update \
