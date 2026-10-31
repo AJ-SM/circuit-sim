@@ -13,16 +13,40 @@ services:
       redis:
         condition: service_healthy
 
+  # Full recognition (detection + wire topology + OCR). 3 processes, one
+  # thread each (OMP_NUM_THREADS=1 in the Dockerfile), so 3 of the 4 vCPUs
+  # work on Generate jobs in parallel. Each process holds its own YOLO and
+  # PaddleOCR copy (~1-1.5 GB), well within 16 GB.
   worker:
     image: circuit-sim-backend:latest
     restart: unless-stopped
-    command: ["celery", "-A", "jobs:celery_app", "worker", "--loglevel=info", "--concurrency=1"]
+    command: ["celery", "-A", "jobs:celery_app", "worker", "-Q", "generate",
+              "-n", "generate@%h", "--loglevel=info",
+              "--concurrency=${GENERATE_CONCURRENCY:-3}"]
     environment:
       CIRCUIT_QUEUE_MODE: celery
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/0
     volumes:
       - ocr-cache:/home/app/.paddlex
+    healthcheck:
+      disable: true
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  # Live-preview detection only (YOLO, no OCR): a dedicated process so
+  # previews never wait behind slow Generate jobs.
+  detect-worker:
+    image: circuit-sim-backend:latest
+    restart: unless-stopped
+    command: ["celery", "-A", "jobs:celery_app", "worker", "-Q", "detect",
+              "-n", "detect@%h", "--loglevel=info",
+              "--concurrency=${DETECT_CONCURRENCY:-1}"]
+    environment:
+      CIRCUIT_QUEUE_MODE: celery
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
     healthcheck:
       disable: true
     depends_on:
