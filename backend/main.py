@@ -23,7 +23,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -32,18 +32,22 @@ app = FastAPI(title="Circuit Simulator Backend")
 
 @app.on_event("startup")
 def _warm_up_models() -> None:
-    """Load YOLO and the OCR models in the background as the server starts,
-    so the first drawing doesn't also pay for loading them (~15 s)."""
+    """Warm YOLO for the synchronous RTP detection endpoint.
+
+    PaddleOCR is loaded in the Celery worker that owns OCR inference, avoiding
+    a second copy of its models in the FastAPI process.
+    """
     import threading
 
     def load() -> None:
         try:
             import numpy as np
             import recognizer
-            import value_reader
+            if os.environ.get("CIRCUIT_QUEUE_MODE", "local").lower() != "celery":
+                import value_reader
+                value_reader.warm_up()
             recognizer.detect_boxes(np.full((320, 320, 3), 255, np.uint8))
-            value_reader.warm_up()
-            print("[circuit-backend] models loaded")
+            print("[circuit-backend] detection model loaded")
         except Exception as exc:
             print(f"[circuit-backend] model warm-up skipped: {exc}")
 
@@ -439,20 +443,61 @@ def detect_components(req: GenerateCircuitRequest) -> dict[str, Any]:
         "detections": [box_to_json(b) for b in boxes],
     }
 
-@app.post("/generate-circuit")
-def generate_circuit(req: GenerateCircuitRequest) -> dict[str, Any]:
-    from recognizer import RecognitionError, box_from_json, recognize
-    image = _decode_request_image(req)
-    boxes = None
-    if req.detections is not None:
-        try:
-            boxes = [box_from_json(d) for d in req.detections]
-        except (KeyError, TypeError, ValueError):
-            raise HTTPException(status_code=400, detail="Malformed detections.")
+@app.post("/generate-circuit", status_code=status.HTTP_202_ACCEPTED)
+def generate_circuit(req: GenerateCircuitRequest) -> dict[str, str]:
+    """Queue recognition and return immediately; workers do the CPU work."""
+    from jobs import generate_circuit_job, submit_local
+
     try:
-        return recognize(image, title=req.title, boxes=boxes, ocr=req.ocr)
-    except RecognitionError as e:
-        raise HTTPException(status_code=422, detail=str(e))
+        if os.environ.get("CIRCUIT_QUEUE_MODE", "local").lower() == "celery":
+            if generate_circuit_job is None:
+                raise RuntimeError("Celery is not installed")
+            job_id = generate_circuit_job.delay(req.dict()).id
+        else:
+            job_id = submit_local(req.dict())
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="The inference queue is unavailable.",
+        ) from exc
+    return {"job_id": job_id, "status": "queued"}
+
+
+def _job(job_id: str):
+    if os.environ.get("CIRCUIT_QUEUE_MODE", "local").lower() != "celery":
+        from jobs import get_local_job
+        return get_local_job(job_id)
+    from celery.result import AsyncResult
+    from jobs import celery_app
+    return AsyncResult(job_id, app=celery_app)
+
+
+@app.get("/job/{job_id}/status")
+def job_status(job_id: str) -> dict[str, str]:
+    state = _job(job_id).state
+    public_state = {
+        "PENDING": "queued",
+        "RECEIVED": "queued",
+        "STARTED": "processing",
+        "RETRY": "processing",
+        "SUCCESS": "complete",
+        "FAILURE": "failed",
+        "REVOKED": "failed",
+    }.get(state, state.lower())
+    return {"job_id": job_id, "status": public_state}
+
+
+@app.get("/job/{job_id}/result")
+def job_result(job_id: str) -> dict[str, Any]:
+    job = _job(job_id)
+    if job.state == "FAILURE":
+        raise HTTPException(status_code=422, detail=str(job.result))
+    if job.state != "SUCCESS":
+        raise HTTPException(status_code=409, detail="Circuit generation is still in progress.")
+    result = job.result
+    if not isinstance(result, dict):
+        raise HTTPException(status_code=500, detail="The worker returned an invalid result.")
+    return result
 
 @app.get("/health")
 async def health() -> dict[str, str]:

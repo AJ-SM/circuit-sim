@@ -13,19 +13,21 @@ circuit-sim/
 └── frontend/           Vite + React + TypeScript app "NETSCOPE" (port 5173)
 ```
 
-Deeper docs: `backend/README.md`, `backend/BACKEND_SUMMARY.md`, `frontend/README.md`.
+Deeper docs: `backend/README.md`, `backend/BACKEND_SUMMARY.md`, `frontend/README.md`, and `docs/` (e.g. `docs/component-placement.md`: how parts are positioned on the canvas).
 
 ## Prerequisites
 
 | Tool | Needed for |
 |------|-----------|
 | Python 3.10+ | backend |
+| Redis | inference job queue and results |
 | Node.js 18+ and npm | frontend |
 | ngspice on `PATH` (or `NGSPICE_PATH` set) | `/simulate` only. Not needed for drawing or image recognition |
 
 ## Run it (humans)
 
-Use two terminals.
+Local development uses an in-process background queue, so only the API and
+frontend are required. Redis and Celery are used for production deployments.
 
 **1. Backend**
 ```
@@ -34,9 +36,17 @@ pip install -r requirements.txt
 python -m uvicorn main:app --port 8000
 ```
 Check it: open http://localhost:8000/health. It should return `{"status":"ok"}`.
-The first `/generate-circuit` call is slow because it loads the model.
 
-**2. Frontend**
+**2. Production queue and inference worker (optional locally)**
+```
+docker run --rm -p 6379:6379 redis:7-alpine
+cd backend
+celery -A jobs:celery_app worker --loglevel=info --concurrency=1
+```
+On Windows, add `--pool=solo` to the Celery command. The worker downloads and
+loads the PaddleOCR PP-OCRv4 models on its first OCR job.
+
+**3. Frontend**
 ```
 cd frontend
 npm install
@@ -55,6 +65,10 @@ Commands are non-interactive and have a clear success signal.
 cd backend && python -m uvicorn main:app --port 8000
 # ready when: curl -s localhost:8000/health  ->  {"status":"ok"}
 
+# Redis and worker (run as separate background processes)
+docker run --rm -p 6379:6379 redis:7-alpine
+cd backend && celery -A jobs:celery_app worker --loglevel=info --concurrency=1
+
 # frontend dev server (background it)
 cd frontend && npm install && npm run dev -- --port 5173
 # Vite prints the real URL. If the port is busy it silently moves to the next one, so read its output.
@@ -71,10 +85,11 @@ img = base64.b64encode(open("some_circuit.jpg", "rb").read()).decode()
 req = urllib.request.Request("http://localhost:8000/generate-circuit",
     json.dumps({"image": img, "title": "test"}).encode(),
     {"Content-Type": "application/json"})
-print(json.load(urllib.request.urlopen(req, timeout=600)).keys())
-# keys: title, timestamp, image, grid, nets, components, component_details, dropped_detections
+queued = json.load(urllib.request.urlopen(req))
+print(queued)  # {"job_id": "...", "status": "queued"}
 ```
-A `422` response means that nothing was recognised in the image. `/simulate` takes a body with `netlist` and `analysis` fields (see `backend/main.py`) and returns an error if ngspice is missing.
+Poll `/job/{job_id}/status`, then fetch `/job/{job_id}/result` when complete.
+`/simulate` takes a body with `netlist` and `analysis` fields (see `backend/main.py`).
 
 Stop servers when done. On Windows, find the PID with `netstat -ano | findstr :8000` and run `taskkill /F /PID <pid>`.
 
@@ -85,6 +100,9 @@ Stop servers when done. On Windows, find the PID with `netstat -ano | findstr :8
 | `CIRCUIT_MODEL_DIR` | backend | `backend/model` |
 | `CIRCUIT_MODEL_WEIGHTS` | backend | `$CIRCUIT_MODEL_DIR/circuit_detector_v2_best.pt` |
 | `NGSPICE_PATH` | backend | `ngspice` on `PATH` |
+| `CELERY_BROKER_URL` | backend + worker | `redis://localhost:6379/0` |
+| `CELERY_RESULT_BACKEND` | backend + worker | broker URL |
+| `CIRCUIT_QUEUE_MODE` | backend | `local`; set to `celery` in production |
 | `VITE_SIMULATE_URL` | frontend (`.env`) | `http://localhost:8000/simulate` |
 | `VITE_GENERATE_URL` | frontend (`.env`) | `http://localhost:8000/generate-circuit` |
 
@@ -94,5 +112,6 @@ If the backend runs on another port or host, copy `frontend/.env.example` to `fr
 
 - **Frontend says it can't reach the backend:** confirm `/health` works and that the `VITE_*` URLs match the backend port.
 - **`/simulate` fails:** ngspice isn't installed or isn't on `PATH`.
-- **`ModuleNotFoundError` on `/generate-circuit`:** run `pip install -r requirements.txt`. Value OCR (easyocr) and the TrOCR second reader are optional, see `backend/BACKEND_SUMMARY.md`.
+- **Generation stays queued:** start Redis and the Celery worker, then check the worker log.
+- **`ModuleNotFoundError` on `/generate-circuit`:** run `pip install -r requirements.txt` in both the API and worker environment.
 - **Slow first detection:** the model is loaded on first use. Later calls are faster.

@@ -6,6 +6,27 @@ import { BACKEND_ORIGIN } from "./backendOrigin";
 export const GENERATE_ENDPOINT =
   import.meta.env.VITE_GENERATE_URL ?? `${BACKEND_ORIGIN}/generate-circuit`;
 
+export const JOB_ENDPOINT =
+  import.meta.env.VITE_JOB_URL ?? GENERATE_ENDPOINT.replace(/\/generate-circuit\/?$/, "/job");
+
+const POLL_INTERVAL_MS = 400;
+const JOB_TIMEOUT_MS = 180_000;
+
+async function errorMessage(response: Response): Promise<string> {
+  let detail = response.statusText;
+  try {
+    const body = await response.json();
+    if (typeof body?.detail === "string") detail = body.detail;
+  } catch {
+    /* non-JSON error body */
+  }
+  return detail || `Backend returned ${response.status}`;
+}
+
+function pause(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
 /** Send a drawn circuit (PNG data URL) to the model and get back a netlist
  *  in the same format as circuitmodel's netlist.json. Pass `detections`
  *  already made on this exact image (RTP) to skip re-running detection.
@@ -30,18 +51,24 @@ export async function generateCircuitFromImage(
     );
   }
 
-  if (!response.ok) {
-    let detail = response.statusText;
-    try {
-      const body = await response.json();
-      if (typeof body?.detail === "string") detail = body.detail;
-    } catch {
-      /* non-JSON error body */
-    }
-    throw new Error(detail || `Backend returned ${response.status}`);
-  }
+  if (!response.ok) throw new Error(await errorMessage(response));
 
-  return (await response.json()) as JsonNetlist & { detections?: Detection[] };
+  const queued = (await response.json()) as { job_id?: string };
+  if (!queued.job_id) throw new Error("Backend did not return an inference job ID.");
+
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < JOB_TIMEOUT_MS) {
+    await pause(POLL_INTERVAL_MS);
+    const statusResponse = await fetch(`${JOB_ENDPOINT}/${encodeURIComponent(queued.job_id)}/status`);
+    if (!statusResponse.ok) throw new Error(await errorMessage(statusResponse));
+    const job = (await statusResponse.json()) as { status: string };
+    if (job.status === "queued" || job.status === "processing") continue;
+
+    const resultResponse = await fetch(`${JOB_ENDPOINT}/${encodeURIComponent(queued.job_id)}/result`);
+    if (!resultResponse.ok) throw new Error(await errorMessage(resultResponse));
+    return (await resultResponse.json()) as JsonNetlist & { detections?: Detection[] };
+  }
+  throw new Error("Circuit generation timed out while waiting for the inference worker.");
 }
 
 /** Detection-only route used by run-time processing (RTP) while drawing.

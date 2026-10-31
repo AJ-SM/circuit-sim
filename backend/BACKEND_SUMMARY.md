@@ -53,7 +53,9 @@ CORS is open (`allow_origins=["*"]`), which is fine for local development but sh
 |---|---|---|
 | `GET` | `/health` | Liveness check |
 | `POST` | `/simulate` | Schematic netlist → ngspice → node voltages / branch currents |
-| `POST` | `/generate-circuit` | Circuit image → detected components + nets (netlist JSON) |
+| `POST` | `/generate-circuit` | Queue circuit recognition and return a job ID (`202`) |
+| `GET` | `/job/{id}/status` | Read queued / processing / complete / failed state |
+| `GET` | `/job/{id}/result` | Fetch the completed netlist JSON |
 
 ### 2.1 `GET /health`
 
@@ -129,7 +131,11 @@ Called by the **⚡ Generate Circuit** button of the drawing modal (`DrawCircuit
 
 `image` may be a `data:` URL or bare base64 (PNG or JPEG; transparency is flattened onto white).
 
-**Response** — the same schema as `circuitmodel`'s `netlist.json`, which `loadNetlistJson()` on the frontend consumes directly:
+**Response** (`202`): `{ "job_id": "...", "status": "queued" }`.
+
+The frontend polls `/job/{id}/status`, then obtains the following netlist from
+`/job/{id}/result`. It has the same schema as `circuitmodel`'s `netlist.json`,
+which `loadNetlistJson()` consumes directly:
 
 ```json
 {
@@ -277,10 +283,10 @@ image ─► decode_image ─► YOLO detect ─► DrawnTopology ─► Netlist
 
 | Step | Detail |
 |---|---|
-| Engine | **easyocr** (English, CPU), loaded once. Optional; if it isn't installed, the step returns nothing |
-| Preprocess | Resample to 1650 px long side (`OCR_LONG_SIDE`, chosen empirically), erode to thicken strokes, allowlist `0-9 . k K m M u U n N p P v V f F h H` |
+| Engine | **PaddleOCR PP-OCRv4** (English, CPU), loaded once in the Celery worker. If it is unavailable, components keep their defaults |
+| Preprocess | Cap the long side at 1600 px, matching the frontend export resolution; run one mobile OCR pass |
 | Merge | Words on one line with a gap ≤ one text-height are joined ("0.7" + "mH") |
-| Second reading | Each label easyocr found is also read by **TrOCR** (`microsoft/trocr-small-handwritten`, a handwriting model): crop with 0.3× text-height vertical padding, resized to 64 px high. easyocr is trained on print and turns unit letters into digits ("9V" → "93", "2mH" → "2n31", "7kΩ" → "1kn"); TrOCR reads most of those right but has its own misses. `parse_item` scores each reading for the part's class: +2 names the right unit, −1 the prefix slot holds a letter that is neither prefix nor unit ("0.7th"), +1 no trailing-digit guess, +2 both engines agree; ties go to TrOCR. The trailing-digit rule is not applied to TrOCR readings. Optional (`transformers` + `sentencepiece`); `VALUE_OCR_TROCR=0` turns it off. Adds ≈0.3 s per label on CPU |
+| Second reading | None. Removing the per-label TrOCR pass is the main latency reduction; the existing class-aware parser still corrects common unit and prefix errors |
 | Parse | `parse_value(text, class)`: number + prefix + optional unit. OCR fixes in the number (O→0, l/I→1, `,`→`.`). Prefixes are read according to the part's class (see below). An explicit unit that contradicts the class is rejected ("0.7mH" is never a resistor). Values outside a plausible range are rejected (R 0.1 Ω–1 GΩ, C 1 pF–0.1 F, L 1 nH–10 H, V 1 mV–10 kV) |
 | Prefix-as-digit rule | The prefix letter is often read as a digit glued onto the number ("4k" → "43"/"46", "47k" → "476", "0.6µF" → "0.64F", "47u" → "470"). `_TRAILING_DIGIT_PREFIX`: resistor **3, 6 → k**; capacitor **4, 6, 0 → µ**; inductor **4 → µ**. Only when no prefix letter was read. For C/L also requires that the unit letter was written or the raw value is out of range. Results are flagged `ocr_inferred`. **Cost:** genuine resistor values 13, 16, 33, 36, 43 and 56 Ω are also rewritten (to 1k, 1k, 3k, 3k, 4k, 5k). `m` has no rule: it was read correctly in every test, so there was no confusion to fix |
 | Assign | `assign_values`: closest (label, part) pairs first; each label and part used once; the label must be within ~1.2× the symbol size |
@@ -288,7 +294,8 @@ image ─► decode_image ─► YOLO detect ─► DrawnTopology ─► Netlist
 
 Prefixes by class: on a capacitor, u/U/M mean µ (mega-farads don't exist); on an inductor, m/M mean milli; on a resistor, m/M mean mega.
 
-**Measured accuracy** (values found / values written on the drawing):
+**Historical EasyOCR/TrOCR measurements** (retained for comparison; rerun the
+fixture set before publishing PaddleOCR accuracy figures):
 
 | Input | Written | Read | Result |
 |---|---|---|---|
@@ -297,7 +304,9 @@ Prefixes by class: on a capacitor, u/U/M mean µ (mega-farads don't exist); on a
 | `n1.jpeg` (lined-paper photo) | 8V · 12Ω · 45µF | **`DC 2`** · **`4`** · default | **0 / 3**: two wrong values assigned, one rejected by the range check |
 | `n2.jpeg`, `mycircuit1.jpeg` | none | none | ✅ No false values (junk like "mF" rejected) |
 
-Takeaway: OCR helps on clean canvas drawings but **is not reliable on handwriting**. It can assign a wrong value with no warning, so values should always be checked in the properties panel. `value_source` shows which values came from OCR. It adds ≈5 s per request on CPU (the first request also loads the models).
+Takeaway: values should still be checked in the properties panel. `value_source`
+shows which values came from OCR. The former two detector passes and per-label
+TrOCR inference are no longer on the request path.
 
 **Polarity, measured:**
 

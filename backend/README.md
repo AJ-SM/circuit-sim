@@ -9,6 +9,7 @@ Python/FastAPI backend for the circuit simulator. Accepts JSON netlists from the
 | Dependency | Install |
 |---|---|
 | Python ≥ 3.11 | https://python.org |
+| Redis | local package or `docker run --rm -p 6379:6379 redis:7-alpine` |
 | ngspice | `winget install ngspice` **or** https://ngspice.sourceforge.io |
 | pip packages | `pip install -r requirements.txt` |
 
@@ -23,6 +24,14 @@ Python/FastAPI backend for the circuit simulator. Accepts JSON netlists from the
 cd circuit-backend
 pip install -r requirements.txt
 uvicorn main:app --reload --port 8000
+```
+
+For production, set `$env:CIRCUIT_QUEUE_MODE = "celery"`, then start Redis and
+the inference worker in two more terminals:
+
+```powershell
+docker run --rm -p 6379:6379 redis:7-alpine
+celery -A jobs:celery_app worker --loglevel=info --concurrency=1 --pool=solo
 ```
 
 The server starts at **http://localhost:8000**.
@@ -71,11 +80,18 @@ Turns an image of a hand-drawn circuit (the frontend's **✎ Draw Circuit** canv
 
 **Request**: `{ "image": "data:image/png;base64,...", "title": "drawn-circuit" }`
 
-**Response**: the same JSON as `circuitmodel`'s `netlist.json` (`components`, `nets`, `component_details`, `wires`, ...). Returns `422` with a `detail` message if nothing is recognised.
+**Response** (`202`): `{ "job_id": "...", "status": "queued" }`.
+
+Poll `GET /job/{job_id}/status`. When it returns `complete`, fetch
+`GET /job/{job_id}/result` for the netlist JSON. Recognition errors are
+returned by the result endpoint with status `422`.
 
 | Env var | Default |
 |---|---|
 | `CIRCUIT_MODEL_DIR` | `./model` |
 | `CIRCUIT_MODEL_WEIGHTS` | `$CIRCUIT_MODEL_DIR/circuit_detector_v2_best.pt` |
+| `CELERY_BROKER_URL` | `redis://localhost:6379/0` |
+| `CELERY_RESULT_BACKEND` | broker URL |
+| `CIRCUIT_QUEUE_MODE` | `local` (`celery` for Redis/Celery workers) |
 
 Component values are filled in with defaults (1k, 10u, DC 5, ...). You can edit them afterwards in the properties panel.

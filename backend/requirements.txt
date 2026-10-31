@@ -5,10 +5,9 @@ ultralytics
 opencv-python
 numpy
 scikit-image
-# optional value OCR: install with  pip install --no-deps easyocr  (see BACKEND_SUMMARY.md)
-# optional handwriting second reader for values (TrOCR, ~250 MB download on first use)
-transformers
-sentencepiece
-# faster OCR text detection on CPU (optional; falls back to torch without them)
-onnxruntime
-onnx
+# Fast CPU value OCR (PP-OCRv4 mobile models)
+# 3.3.x CPU fails on Windows (oneDNN "ConvertPirAttribute2RuntimeAttribute")
+paddlepaddle==3.2.2
+paddleocr
+# Async inference queue and Redis result backend
+celery[redis]

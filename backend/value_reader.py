@@ -5,7 +5,7 @@ Reads handwritten component values ("4V", "0.7 mH", "7kΩ", "0.6µF") that
 sit next to each detected symbol, so generated circuits keep the drawn
 values instead of defaults.
 
-  run_ocr(image)                  → OcrItem list (easyocr if installed, else [])
+  run_ocr(image)                  → OcrItem list (PaddleOCR if installed, else [])
   parse_value(text, cls_name)     → (SI value, unit) from one label string
   value_near_box(box, cls, items) → (SI value, unit) for one component
   assign_values(boxes, items)     → best label per component, each label used once
@@ -22,6 +22,7 @@ ambiguous prefixes (an "M" next to a capacitor is micro, never mega).
 import math
 import re
 import os
+import json
 import threading
 from dataclasses import dataclass, field
 
@@ -106,14 +107,19 @@ class OcrItem:
 
 _reader = None
 _reader_lock = threading.Lock()
+_ocr_lock = threading.Lock()
 
 
 def ocr_available() -> bool:
     try:
-        import easyocr  # noqa: F401
+        import paddleocr  # noqa: F401
         return True
     except ImportError:
-        return False
+        try:
+            import easyocr  # noqa: F401
+            return True
+        except ImportError:
+            return False
 
 
 # Only characters a value label can contain. easyocr's English charset has no
@@ -139,77 +145,70 @@ OCR_LONG_SIDE = 1650
 # OCR_LONG_SIDE (loses labels), cropping to the ink (drawings fill the frame).
 # Set VALUE_OCR_ONNX=0 to keep easyocr's own torch detector.
 
-def _use_all_cores() -> None:
-    try:
-        import torch
-        torch.set_num_threads(os.cpu_count() or 1)
-    except Exception:
-        pass
-
-
-class _OrtCraft:
-    """Drop-in for easyocr's CRAFT module: same call, same tensors back,
-    computed by ONNX Runtime."""
-    def __init__(self, session):
-        self.session = session
-
-    def __call__(self, x):
-        import torch
-        y, feature = self.session.run(None, {"x": x.detach().cpu().numpy().astype(np.float32)})
-        return torch.from_numpy(y), torch.from_numpy(feature)
-
-    def eval(self):
-        return self
-
-
-def _onnx_detector(reader):
-    """CRAFT exported to ONNX once (cached next to easyocr's weights) and
-    loaded in ONNX Runtime, or None to keep the torch detector."""
-    if os.environ.get("VALUE_OCR_ONNX", "1") == "0":
-        return None
-    try:
-        import onnxruntime as ort
-        import torch
-        net = getattr(reader.detector, "module", reader.detector).eval()
-        path = os.path.join(reader.model_storage_directory, "craft_ort.onnx")
-        if not os.path.exists(path):
-            tmp = path + ".tmp"
-            torch.onnx.export(
-                net, torch.randn(1, 3, 640, 800), tmp,
-                input_names=["x"], output_names=["y", "feature"],
-                dynamic_axes={"x": {2: "h", 3: "w"}, "y": {1: "h2", 2: "w2"},
-                              "feature": {2: "h2", 3: "w2"}},
-                opset_version=17, dynamo=False)
-            os.replace(tmp, path)
-        opts = ort.SessionOptions()
-        opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        opts.intra_op_num_threads = os.cpu_count() or 1
-        ort_net = _OrtCraft(ort.InferenceSession(path, opts, providers=["CPUExecutionProvider"]))
-        # Must agree with the torch network before it replaces it.
-        x = torch.rand(1, 3, 96, 128)
-        with torch.no_grad():
-            ref = net(x)[0].numpy()
-        if not np.allclose(ort_net(x)[0].numpy(), ref, atol=1e-3):
-            raise RuntimeError("ONNX CRAFT output differs from torch")
-        return ort_net
-    except Exception as exc:  # no onnxruntime / onnx, export failed, …
-        print(f"[value_reader] ONNX text detector unavailable, using torch: {exc}")
-        return None
-
-
 def _get_reader():
-    """The easyocr reader, built once (thread-safe) with the fast detector."""
+    """Build one CPU reader, preferring PP-OCRv4 with EasyOCR fallback."""
     global _reader
     with _reader_lock:
         if _reader is None:
-            import easyocr
-            _use_all_cores()
-            reader = easyocr.Reader(["en"], gpu=False, verbose=False)
-            fast = _onnx_detector(reader)
-            if fast is not None:
-                reader.detector = fast
-            _reader = reader
+            try:
+                from paddleocr import PaddleOCR
+                try:
+                    _reader = PaddleOCR(
+                        lang="en", ocr_version="PP-OCRv4",
+                        use_doc_orientation_classify=False,
+                        use_doc_unwarping=False,
+                        use_textline_orientation=False,
+                    )
+                except (TypeError, ValueError):
+                    _reader = PaddleOCR(
+                        lang="en", ocr_version="PP-OCRv4",
+                        use_angle_cls=False, show_log=False,
+                    )
+                print("[value_reader] OCR engine: PaddleOCR PP-OCRv4")
+            except ImportError:
+                import easyocr
+                _reader = easyocr.Reader(["en"], gpu=False, verbose=False)
+                print("[value_reader] OCR engine: EasyOCR fallback")
     return _reader
+
+
+def _result_items(raw) -> list[tuple[object, str, float]]:
+    """Normalize PaddleOCR 2.x and 3.x output."""
+    if raw is None:
+        return []
+    data = raw
+    if not isinstance(data, (dict, list, tuple)):
+        data = getattr(data, "json", data)
+        data = data() if callable(data) else data
+    if isinstance(data, str):
+        try:
+            data = json.loads(data)
+        except json.JSONDecodeError:
+            return []
+    if isinstance(data, dict):
+        data = data.get("res", data)
+        polygons = data.get("dt_polys", data.get("rec_polys", []))
+        return list(zip(polygons, data.get("rec_texts", []), data.get("rec_scores", [])))
+    if isinstance(data, (list, tuple)):
+        # EasyOCR line: [polygon, text, confidence]
+        if len(data) == 3 and isinstance(data[1], str):
+            return [(data[0], data[1], float(data[2]))]
+        if (len(data) == 2 and isinstance(data[1], (list, tuple))
+                and len(data[1]) >= 2 and isinstance(data[1][0], str)):
+            return [(data[0], data[1][0], float(data[1][1]))]
+        out = []
+        for part in data:
+            out.extend(_result_items(part))
+        return out
+    return []
+
+
+def _predict(reader, image: np.ndarray):
+    if hasattr(reader, "predict"):
+        return reader.predict(input=image)
+    if hasattr(reader, "readtext"):
+        return reader.readtext(image, allowlist=_OCR_ALLOWLIST)
+    return reader.ocr(image, cls=False)
 
 
 def warm_up() -> None:
@@ -217,43 +216,67 @@ def warm_up() -> None:
     if not ocr_available():
         return
     reader = _get_reader()
-    reader.readtext(np.full((64, 160), 255, np.uint8))
-    _get_trocr()
+    with _ocr_lock:
+        _predict(reader, np.full((64, 160, 3), 255, np.uint8))
 
 
 def run_ocr(image: np.ndarray) -> list[OcrItem]:
     """Text boxes in the image, with neighbouring words on one line merged
     ("0.7" + "mH" → "0.7mH"). Returns [] when no OCR engine is installed.
 
-    Thin pen strokes OCR badly and results shift with resolution, so the
-    image is resampled to a fixed working size and strokes are thickened
-    before recognition. Thickening blurs small printed labels together, so
-    the unthickened image is read too and the two readings merged."""
+    Small images are enlarged for OCR. PaddleOCR reads small print at two
+    scales; EasyOCR reads original and thickened strokes."""
     if not ocr_available():
         return []
     import cv2
     reader = _get_reader()
 
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
-    scale = OCR_LONG_SIDE / max(gray.shape)
-    gray = cv2.resize(gray, None, fx=scale, fy=scale,
-                      interpolation=cv2.INTER_CUBIC if scale > 1 else cv2.INTER_AREA)
-    thick = cv2.erode(gray, np.ones((3, 3), np.uint8))   # dark ink → thicker
+    is_easyocr = hasattr(reader, "readtext")
+    # EasyOCR's detector was tuned at a fixed working size. Upscaling small
+    # canvas exports is essential for its tiny handwritten value labels.
+    long_side = max(image.shape[:2])
+    scale = 1650 / long_side if is_easyocr else min(1.0, OCR_LONG_SIDE / long_side)
+    working = image if scale == 1.0 else cv2.resize(
+        image, None, fx=scale, fy=scale,
+        interpolation=cv2.INTER_CUBIC if scale > 1 else cv2.INTER_AREA)
+    # EasyOCR's print model needs both views: thickening helps handwritten
+    # strokes, while the original view preserves small digits and units.
+    # PaddleOCR performs better with one pass on the original colour image.
+    if is_easyocr:
+        gray = cv2.cvtColor(working, cv2.COLOR_BGR2GRAY) if working.ndim == 3 else working
+        views = [(cv2.erode(gray, np.ones((3, 3), np.uint8)), scale), (gray, scale)]
+    elif long_side < 900:
+        # A small uploaded schematic can hold labels only a few pixels high.
+        # The two scales recover complementary words while remaining faster
+        # than EasyOCR's two full detector passes.
+        views = [
+            (cv2.resize(image, None, fx=900 / long_side, fy=900 / long_side,
+                        interpolation=cv2.INTER_CUBIC), 900 / long_side),
+            (cv2.resize(image, None, fx=1650 / long_side, fy=1650 / long_side,
+                        interpolation=cv2.INTER_CUBIC), 1650 / long_side),
+        ]
+    else:
+        views = [(working, scale)]
 
     passes = []
-    for img in (thick, gray):
+    with _ocr_lock:
+        raw_passes = [_predict(reader, view) for view, _ in views]
+    for raw, (_, view_scale) in zip(raw_passes, views):
         found = []
-        for quad, text, conf in reader.readtext(img, allowlist=_OCR_ALLOWLIST):
-            xs = [p[0] / scale for p in quad]
-            ys = [p[1] / scale for p in quad]
-            found.append(OcrItem(text, int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys)), float(conf)))
+        for quad, text, conf in _result_items(raw):
+            points = np.asarray(quad, dtype=float).reshape(-1, 2)
+            if points.size == 0 or not str(text).strip():
+                continue
+            xs, ys = points[:, 0] / view_scale, points[:, 1] / view_scale
+            found.append(OcrItem(
+                str(text).strip(), int(xs.min()), int(ys.min()),
+                int(xs.max()), int(ys.max()), float(conf),
+            ))
         passes.append(found)
-    items = merge_line_items(_merge_passes(*passes))
-
-    orig_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
-    for it, alt in zip(items, read_handwriting_batch(orig_gray, items)):
-        if alt:
-            it.alts.append(alt)
+    combined = _merge_passes(*passes) if len(passes) == 2 else passes[0]
+    items = merge_line_items(combined)
+    print("[value_reader] OCR labels:",
+          [(item.text, round(item.conf, 2)) for item in items])
     return items
 
 
@@ -632,8 +655,8 @@ class Designator:
 
 def read_designators(image: np.ndarray, items: list[OcrItem]) -> list[Designator]:
     """Designator labels among `items`, each paired with the value written
-    directly under it. A value the full-image OCR missed (small single
-    digits often are) is re-read from just that spot."""
+    directly under it. A small value missed by the full-image detector is
+    read from the strip below the designator."""
     found = [Designator(n, it) for it in items if (n := parse_designator(it.text))]
     taken: set[int] = set()
     for d in found:
@@ -684,7 +707,12 @@ def _reread_below(image: np.ndarray, it: OcrItem) -> OcrItem | None:
     s = 48 / crop.shape[0]
     crop = cv2.resize(crop, None, fx=s, fy=s, interpolation=cv2.INTER_CUBIC)
     crop = cv2.copyMakeBorder(crop, 12, 12, 12, 12, cv2.BORDER_CONSTANT, value=255)
-    res = _reader.recognize(crop, allowlist=_VALUE_ALLOWLIST)
+    with _ocr_lock:
+        if hasattr(_reader, "recognize"):
+            res = _result_items(_reader.recognize(crop, allowlist=_VALUE_ALLOWLIST))
+        else:
+            crop_bgr = cv2.cvtColor(crop, cv2.COLOR_GRAY2BGR)
+            res = _result_items(_predict(_reader, crop_bgr))
     if not res:
         return None
     _, text, conf = max(res, key=lambda r: r[2])
