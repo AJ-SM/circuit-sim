@@ -1,3 +1,4 @@
 /backend/circuit-sim-backend-linux-amd64.tar
 __pycache__/
 *.py[cod]
+*.txt
