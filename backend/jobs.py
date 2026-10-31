@@ -13,6 +13,7 @@ On Windows, add ``--pool=solo`` (and use one process per queue).
 import base64
 import binascii
 import os
+import sys
 import threading
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -22,6 +23,13 @@ try:
 except ImportError:  # Local development can use the in-process queue.
     Celery = None
 
+
+# `celery -A jobs:celery_app` puts the working directory on sys.path only
+# while it imports this module, so the lazy `from recognizer import ...` in
+# the tasks failed with ModuleNotFoundError. Keep this directory importable.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
 
 BROKER_URL = os.environ.get("CELERY_BROKER_URL", "redis://localhost:6379/0")
 RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND", BROKER_URL)
