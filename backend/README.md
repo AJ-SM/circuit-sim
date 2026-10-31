@@ -31,7 +31,9 @@ docker compose ps
 curl http://localhost:18080/health
 ```
 
-Compose runs the API, one Celery inference worker, and Redis. It builds the
+Compose runs the API, a `generate` worker (full recognition + OCR, 3 processes;
+set `GENERATE_CONCURRENCY` to change), a `detect` worker (live-preview detection
+only; `DETECT_CONCURRENCY`), and Redis. It builds the
 `circuit-sim-backend:latest` image from the Dockerfile, including ngspice and
 the bundled model weights. Set `API_PORT` to change the host port (default:
 `18080`). Redis stores queued jobs in a persistent Docker volume. The worker
@@ -55,12 +57,17 @@ uvicorn main:app --reload --port 8000
 ```
 
 For production, set `$env:CIRCUIT_QUEUE_MODE = "celery"`, then start Redis and
-the inference worker in two more terminals:
+the two inference workers in more terminals:
 
 ```powershell
 docker run --rm -p 6379:6379 redis:7-alpine
-celery -A jobs:celery_app worker --loglevel=info --concurrency=1 --pool=solo
+celery -A jobs:celery_app worker -Q generate -n generate@%h --loglevel=info --pool=solo
+celery -A jobs:celery_app worker -Q detect -n detect@%h --loglevel=info --pool=solo
 ```
+
+On Linux, drop `--pool=solo` and use `--concurrency=3` for the `generate`
+worker. In celery mode `/detect-components` runs on the `detect` queue and the
+API process loads no models.
 
 The server starts at **http://localhost:8000**.
 

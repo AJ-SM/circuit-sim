@@ -41,9 +41,13 @@ Check it: open http://localhost:8000/health. It should return `{"status":"ok"}`.
 ```
 docker run --rm -p 6379:6379 redis:7-alpine
 cd backend
-celery -A jobs:celery_app worker --loglevel=info --concurrency=1
+celery -A jobs:celery_app worker -Q generate -n generate@%h --loglevel=info --concurrency=3
+celery -A jobs:celery_app worker -Q detect -n detect@%h --loglevel=info --concurrency=1
 ```
-On Windows, add `--pool=solo` to the Celery command. The worker downloads and
+Run the two workers in separate terminals and set `CIRCUIT_QUEUE_MODE=celery`
+for the API. The `generate` worker does full recognition and OCR; the `detect`
+worker does only the live-preview detection, so previews never wait behind
+OCR jobs. On Windows, add `--pool=solo` to each Celery command. The worker downloads and
 loads the PaddleOCR PP-OCRv4 models on its first OCR job.
 
 **3. Frontend**
@@ -67,7 +71,8 @@ cd backend && python -m uvicorn main:app --port 8000
 
 # Redis and worker (run as separate background processes)
 docker run --rm -p 6379:6379 redis:7-alpine
-cd backend && celery -A jobs:celery_app worker --loglevel=info --concurrency=1
+cd backend && celery -A jobs:celery_app worker -Q generate -n generate@%h --loglevel=info --concurrency=3
+cd backend && celery -A jobs:celery_app worker -Q detect -n detect@%h --loglevel=info --concurrency=1
 
 # frontend dev server (background it)
 cd frontend && npm install && npm run dev -- --port 5173

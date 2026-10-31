@@ -1,7 +1,13 @@
 """Celery jobs for CPU-heavy circuit recognition.
 
-Run a worker from the backend directory with:
-    celery -A jobs:celery_app worker --loglevel=info --concurrency=1
+Two queues keep the live preview responsive:
+  * ``detect``   - YOLO-only detection for the drawing preview (fast, small).
+  * ``generate`` - full recognition: detection, wire topology and OCR (slow).
+
+Run the workers from the backend directory with:
+    celery -A jobs:celery_app worker -Q generate --concurrency=3 --loglevel=info
+    celery -A jobs:celery_app worker -Q detect   --concurrency=1 --loglevel=info
+On Windows, add ``--pool=solo`` (and use one process per queue).
 """
 
 import base64
@@ -20,6 +26,12 @@ except ImportError:  # Local development can use the in-process queue.
 BROKER_URL = os.environ.get("CELERY_BROKER_URL", "redis://localhost:6379/0")
 RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND", BROKER_URL)
 
+GENERATE_QUEUE = "generate"
+DETECT_QUEUE = "detect"
+# A preview older than this is useless (the user has kept drawing), so a
+# backed-up detect queue drops it instead of working through stale images.
+DETECT_EXPIRES_S = float(os.environ.get("CIRCUIT_DETECT_EXPIRES", "10"))
+
 celery_app = Celery("circuit_jobs", broker=BROKER_URL, backend=RESULT_BACKEND) if Celery else None
 if celery_app:
     celery_app.conf.update(
@@ -29,7 +41,23 @@ if celery_app:
         result_expires=3600,
         task_track_started=True,
         worker_prefetch_multiplier=1,
+        task_routes={
+            "circuit.generate": {"queue": GENERATE_QUEUE},
+            "circuit.detect": {"queue": DETECT_QUEUE},
+        },
     )
+
+    from celery.signals import worker_process_init
+
+    @worker_process_init.connect
+    def _warm_up_detector(**_kwargs) -> None:
+        """Load YOLO in each worker process so its first job isn't slow."""
+        try:
+            import numpy as np
+            from recognizer import detect_boxes
+            detect_boxes(np.full((320, 320, 3), 255, np.uint8))
+        except Exception as exc:  # warm-up is best effort
+            print(f"[jobs] detector warm-up skipped: {exc}")
 
 
 def _decode_image(payload: str):
@@ -63,8 +91,26 @@ def run_generation(payload: dict) -> dict:
     )
 
 
+def run_detection(payload: dict) -> dict:
+    """YOLO component detection only (the drawing preview)."""
+    from recognizer import box_to_json, detect_boxes
+
+    image = _decode_image(payload["image"])
+    h, w = image.shape[:2]
+    return {
+        "image_width": w, "image_height": h,
+        "detections": [box_to_json(b) for b in detect_boxes(image)],
+    }
+
+
 generate_circuit_job = (
     celery_app.task(name="circuit.generate", acks_late=True)(run_generation)
+    if celery_app else None
+)
+
+# Not acks_late: a lost preview is simply re-requested by the next stroke.
+detect_components_job = (
+    celery_app.task(name="circuit.detect")(run_detection)
     if celery_app else None
 )
 

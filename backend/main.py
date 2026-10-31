@@ -32,20 +32,23 @@ app = FastAPI(title="Circuit Simulator Backend")
 
 @app.on_event("startup")
 def _warm_up_models() -> None:
-    """Warm YOLO for the synchronous RTP detection endpoint.
+    """Warm the models used in-process (local mode only).
 
-    PaddleOCR is loaded in the Celery worker that owns OCR inference, avoiding
-    a second copy of its models in the FastAPI process.
+    In celery mode the API runs no inference at all: detection runs on the
+    `detect` worker and full recognition + OCR on the `generate` workers,
+    so the API keeps no copy of YOLO or PaddleOCR in memory.
     """
     import threading
+
+    if os.environ.get("CIRCUIT_QUEUE_MODE", "local").lower() == "celery":
+        return
 
     def load() -> None:
         try:
             import numpy as np
             import recognizer
-            if os.environ.get("CIRCUIT_QUEUE_MODE", "local").lower() != "celery":
-                import value_reader
-                value_reader.warm_up()
+            import value_reader
+            value_reader.warm_up()
             recognizer.detect_boxes(np.full((320, 320, 3), 255, np.uint8))
             print("[circuit-backend] detection model loaded")
         except Exception as exc:
@@ -429,8 +432,40 @@ def _decode_request_image(req: GenerateCircuitRequest):
         raise HTTPException(status_code=400, detail="Image is not valid base64.")
     return decode_image(data)
 
+DETECT_TIMEOUT_S = float(os.environ.get("CIRCUIT_DETECT_TIMEOUT", "15"))
+
+
+def _celery_mode() -> bool:
+    return os.environ.get("CIRCUIT_QUEUE_MODE", "local").lower() == "celery"
+
+
 @app.post("/detect-components")
 def detect_components(req: GenerateCircuitRequest) -> dict[str, Any]:
+    """Live-preview detection. In celery mode it runs on the dedicated
+    `detect` worker queue (so the API process never runs YOLO and previews
+    never wait behind slow OCR jobs); the request still returns the boxes
+    directly, so the frontend contract is unchanged."""
+    if _celery_mode():
+        from jobs import DETECT_EXPIRES_S, detect_components_job
+        if detect_components_job is None:
+            raise HTTPException(status_code=503, detail="Celery is not installed")
+        _decode_request_image(req)  # reject bad base64 here with a 400
+        try:
+            job = detect_components_job.apply_async(
+                args=[{"image": req.image}], expires=DETECT_EXPIRES_S)
+        except Exception as exc:
+            raise HTTPException(status_code=503,
+                                detail="The inference queue is unavailable.") from exc
+        try:
+            return job.get(timeout=DETECT_TIMEOUT_S)
+        except Exception as exc:
+            from celery.exceptions import TaskRevokedError, TimeoutError as CeleryTimeout
+            if isinstance(exc, (CeleryTimeout, TaskRevokedError)):
+                job.forget()
+                raise HTTPException(status_code=503,
+                                    detail="Detection is busy, try again.") from exc
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     from recognizer import RecognitionError, box_to_json, detect_boxes
     image = _decode_request_image(req)
     try:
