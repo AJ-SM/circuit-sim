@@ -28,7 +28,9 @@ MODEL_DIR = Path(
     )
 )
 WEIGHTS = Path(
-    os.environ.get("CIRCUIT_MODEL_WEIGHTS", MODEL_DIR / "circuit_yolo11_best.pt")
+    # circuit_yolo11_best.pt stays selectable per request, but it misses
+    # sources and ground, so the older model is the default.
+    os.environ.get("CIRCUIT_MODEL_WEIGHTS", MODEL_DIR / "circuit_detector_best.pt")
 )
 
 # Same tuning as circuit_pipeline.py
@@ -51,9 +53,9 @@ if str(MODEL_DIR) not in sys.path:
     sys.path.insert(0, str(MODEL_DIR))
 
 # Loaded YOLO models, keyed by weights path (each loaded once on first use),
-# with the class-name map for each: the model's own label -> pipeline name.
+# with each model's settings (see _load_model_config).
 _models: dict[Path, object] = {}
-_class_names: dict[Path, dict[str, str]] = {}
+_model_configs: dict[Path, dict] = {}
 _model_lock = threading.Lock()
 
 
@@ -81,24 +83,37 @@ def _resolve_weights(model: str | None) -> Path:
     raise RecognitionError(f"Unknown model '{model}'.")
 
 
-def _load_class_names(weights: Path) -> dict[str, str]:
-    """Optional `<weights>.names.json` beside the weights, mapping the model's
-    own class labels to the names the pipeline uses ("Resistor", ...). Needed
-    for models trained with numbered classes, e.g. circuit_yolo11_best.pt."""
+def _load_model_config(weights: Path) -> dict:
+    """Optional `<weights stem>.json` beside the weights, e.g.
+    circuit_yolo11_best.json for circuit_yolo11_best.pt:
+
+      "names": the model's own class labels -> the names the pipeline uses
+               ("Resistor", ...). Needed for models trained with numbered
+               classes.
+      "imgsz": input sizes to run the upright view at; detections from all
+               sizes are merged. Some models only see small symbols at a
+               larger size, but lose large ones there.
+
+    Returns {"names": {...}, "imgsz": [...]}; an imgsz of None means the
+    model's own training size."""
     import json
-    path = weights.with_suffix(".names.json")
-    if not path.exists():
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        raise RecognitionError(f"Could not read class names from '{path.name}': {exc}")
-    return {str(k): str(v) for k, v in data.items()}
+    path = weights.with_suffix(".json")
+    data = {}
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise RecognitionError(f"Could not read model settings from '{path.name}': {exc}")
+    sizes = data.get("imgsz") or [None]
+    return {
+        "names": {str(k): str(v) for k, v in (data.get("names") or {}).items()},
+        "imgsz": [int(s) if s else None for s in (sizes if isinstance(sizes, list) else [sizes])],
+    }
 
 
 def _get_model(model: str | None = None):
     """Load the chosen YOLO weights once and reuse them across requests.
-    Returns (model, class-name map)."""
+    Returns (model, settings from _load_model_config)."""
     weights = _resolve_weights(model)
     with _model_lock:
         if weights not in _models:
@@ -108,9 +123,9 @@ def _get_model(model: str | None = None):
                     "Set CIRCUIT_MODEL_WEIGHTS or CIRCUIT_MODEL_DIR."
                 )
             from ultralytics import YOLO
-            _class_names[weights] = _load_class_names(weights)
+            _model_configs[weights] = _load_model_config(weights)
             _models[weights] = YOLO(str(weights))
-        return _models[weights], _class_names[weights]
+        return _models[weights], _model_configs[weights]
 
 
 def decode_image(data: bytes) -> np.ndarray:
@@ -143,17 +158,18 @@ def _rotate(image: np.ndarray, angle: float):
     return rotated, cv2.invertAffineTransform(m)
 
 
-def _predict(image: np.ndarray, angle: float,
-             model_name: str | None = None) -> list[tuple[str, float, np.ndarray]]:
+def _predict(image: np.ndarray, angle: float, model_name: str | None = None,
+             imgsz: int | None = None) -> list[tuple[str, float, np.ndarray]]:
     """(class, conf, 4x2 corner polygon in original image coords) per box."""
-    model, class_names = _get_model(model_name)
+    model, config = _get_model(model_name)
     src, inv = (image, None) if angle == 0 else _rotate(image, angle)
+    size = {"imgsz": imgsz} if imgsz else {}
     with _model_lock:
-        preds = model.predict(source=src, conf=YOLO_CONF, iou=YOLO_IOU, verbose=False)
+        preds = model.predict(source=src, conf=YOLO_CONF, iou=YOLO_IOU, verbose=False, **size)
     out = []
     for box in preds[0].boxes:
         label = str(model.names[int(box.cls.item())])
-        cls = class_names.get(label, label)
+        cls = config["names"].get(label, label)
         if cls in IGNORED_CLASSES:
             continue
         x1, y1, x2, y2 = box.xyxy[0].tolist()
@@ -189,10 +205,14 @@ def detect_boxes(image: np.ndarray, rotations: bool = True, model: str | None = 
     the bounds so it doesn't cut the wires running past the slanted part."""
     from wire_detector import BoundingBox
 
-    dets = [(*d, 0) for d in _predict(image, 0, model)]
+    # The upright view runs at every input size the model's settings list
+    # (merged below like the rotated views); rotated views use the first.
+    sizes = _get_model(model)[1]["imgsz"]
+    dets = [(*d, 0) for sz in sizes for d in _predict(image, 0, model, sz)]
     if rotations:
         for angle in ROTATED_VIEWS:
-            dets += [(*d, angle) for d in _predict(image, angle, model) if d[0] in ROTATED_CLASSES]
+            dets += [(*d, angle) for d in _predict(image, angle, model, sizes[0])
+                     if d[0] in ROTATED_CLASSES]
 
     # Greedy clustering, most confident first.
     clusters: list[list[tuple]] = []

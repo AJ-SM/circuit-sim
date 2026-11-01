@@ -124,7 +124,7 @@ returned by the result endpoint with status `422`.
 | Env var | Default |
 |---|---|
 | `CIRCUIT_MODEL_DIR` | `./model` |
-| `CIRCUIT_MODEL_WEIGHTS` | `$CIRCUIT_MODEL_DIR/circuit_yolo11_best.pt` |
+| `CIRCUIT_MODEL_WEIGHTS` | `$CIRCUIT_MODEL_DIR/circuit_detector_best.pt` |
 | `CELERY_BROKER_URL` | `redis://localhost:6379/0` |
 | `CELERY_RESULT_BACKEND` | broker URL |
 | `CIRCUIT_QUEUE_MODE` | `local` (`celery` for Redis/Celery workers) |

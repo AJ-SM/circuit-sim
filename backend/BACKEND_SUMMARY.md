@@ -39,7 +39,7 @@ uvicorn main:app --port 8000
 |---|---|---|
 | `NGSPICE_PATH` | `ngspice` | `/simulate` |
 | `CIRCUIT_MODEL_DIR` | `./model` (next to `recognizer.py`) | `/generate-circuit` |
-| `CIRCUIT_MODEL_WEIGHTS` | `$CIRCUIT_MODEL_DIR/circuit_yolo11_best.pt` | `/generate-circuit` |
+| `CIRCUIT_MODEL_WEIGHTS` | `$CIRCUIT_MODEL_DIR/circuit_detector_best.pt` | `/generate-circuit` |
 
 Frontend side (`circuit-sim/.env`): `VITE_SIMULATE_URL`, `VITE_GENERATE_URL`.
 
@@ -189,7 +189,7 @@ which `loadNetlistJson()` consumes directly:
 | Architecture | **YOLOv12n** (nano), Ultralytics `8.4.x`, starting from COCO-pretrained `yolo12n.pt` |
 | Task | Object detection: bounding box + class per circuit symbol |
 | Weights used | `model/circuit_detector_v2_best.pt` (hand-drawn fine-tune) |
-| Older weights | `model/circuit_detector_best.pt` (v1, 8 classes) and `model/circuit_detector_v2_best.pt`; selectable per request via `model` |
+| Other weights | `model/circuit_detector_v2_best.pt` and `model/circuit_yolo11_best.pt` (settings in `circuit_yolo11_best.json`); selectable per request via `model` |
 | Inference settings | `conf = 0.25`, `iou = 0.45` (`recognizer.py`) |
 | Loading | Loaded once on the first request, then reused; a lock serialises predictions |
 

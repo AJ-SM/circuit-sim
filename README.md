@@ -103,7 +103,7 @@ Stop servers when done. On Windows, find the PID with `netstat -ano | findstr :8
 | Variable | Where | Default |
 |----------|-------|---------|
 | `CIRCUIT_MODEL_DIR` | backend | `backend/model` |
-| `CIRCUIT_MODEL_WEIGHTS` | backend | `$CIRCUIT_MODEL_DIR/circuit_yolo11_best.pt` |
+| `CIRCUIT_MODEL_WEIGHTS` | backend | `$CIRCUIT_MODEL_DIR/circuit_detector_best.pt` |
 | `NGSPICE_PATH` | backend | `ngspice` on `PATH` |
 | `CELERY_BROKER_URL` | backend + worker | `redis://localhost:6379/0` |
 | `CELERY_RESULT_BACKEND` | backend + worker | broker URL |
