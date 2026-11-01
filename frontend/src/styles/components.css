@@ -460,6 +460,17 @@
   width: 90px;
 }
 
+.draw-model {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.draw-model select {
+  width: auto;
+  max-width: 200px;
+}
+
 .draw-hint,
 .draw-error {
   position: absolute;

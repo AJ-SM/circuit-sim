@@ -96,6 +96,7 @@ def run_generation(payload: dict) -> dict:
         title=payload.get("title", "drawn-circuit"),
         boxes=boxes,
         ocr=payload.get("ocr", True),
+        model=payload.get("model"),
     )
 
 
@@ -107,7 +108,7 @@ def run_detection(payload: dict) -> dict:
     h, w = image.shape[:2]
     return {
         "image_width": w, "image_height": h,
-        "detections": [box_to_json(b) for b in detect_boxes(image)],
+        "detections": [box_to_json(b) for b in detect_boxes(image, model=payload.get("model"))],
     }
 
 

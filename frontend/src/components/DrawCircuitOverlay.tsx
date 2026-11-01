@@ -1,6 +1,12 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useCircuitStore } from "../store/circuitStore";
-import { detectComponents, generateCircuitFromImage, type Detection } from "../api/generateCircuit";
+import {
+  detectComponents,
+  fetchModels,
+  generateCircuitFromImage,
+  type Detection,
+  type ModelInfo,
+} from "../api/generateCircuit";
 import type { JsonNetlist } from "../utils/loadNetlistJson";
 
 /** Long side (px) of the image sent to the model. The drawing fills the
@@ -54,6 +60,22 @@ function loadImageFile(file: File): Promise<string> {
 /** Pause (ms) after the last stroke before run-time processing kicks in. */
 const RTP_DELAY = 450;
 
+/** localStorage key for the chosen detection model ("" = backend default). */
+const MODEL_KEY = "circuit-sim.detection-model";
+
+/** "circuit_yolo11_best.pt" → "circuit_yolo11_best". */
+function modelLabel(id: string): string {
+  return id.replace(/\.pt$/i, "");
+}
+
+function loadStoredModel(): string {
+  try {
+    return window.localStorage.getItem(MODEL_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
 /** Freehand drawing layer laid over the schematic canvas area. */
 export function DrawCircuitOverlay({ onClose, pickImageOnOpen }: DrawCircuitOverlayProps) {
   const loadNetlist = useCircuitStore((s) => s.loadNetlist);
@@ -92,6 +114,36 @@ export function DrawCircuitOverlay({ onClose, pickImageOnOpen }: DrawCircuitOver
   >(null);
   const prefetchBusyRef = useRef(false);
 
+  // ── Detection model choice ("" = whatever the backend uses by default) ──
+  const [models, setModels] = useState<ModelInfo[]>([]);
+  const [model, setModel] = useState<string>(loadStoredModel);
+  const modelArg = model || undefined;
+
+  useEffect(() => {
+    const abort = new AbortController();
+    fetchModels(abort.signal)
+      .then((list) => {
+        setModels(list);
+        // A remembered model that the backend no longer has falls back to default.
+        setModel((m) => (m && !list.some((x) => x.id === m) ? "" : m));
+      })
+      .catch(() => {
+        /* backend unreachable or older backend: keep the default model */
+      });
+    return () => abort.abort();
+  }, []);
+
+  function chooseModel(id: string) {
+    setModel(id);
+    try {
+      window.localStorage.setItem(MODEL_KEY, id);
+    } catch {
+      /* storage unavailable: the choice lasts for this session only */
+    }
+    // Results from the previous model are stale: re-run RTP and drop the prefetch.
+    setDrawVersion((v) => v + 1);
+  }
+
   useEffect(() => {
     if (!rtp || image || strokesRef.current.length === 0) {
       setDetections(null);
@@ -105,7 +157,7 @@ export function DrawCircuitOverlay({ onClose, pickImageOnOpen }: DrawCircuitOver
       const png = exportForModel();
       setDetecting(true);
       try {
-        const items = await detectComponents(png, abort.signal);
+        const items = await detectComponents(png, abort.signal, modelArg);
         if (abort.signal.aborted) return;
         setDetections({ items, scale: k, version, png });
         // Recognise the whole circuit in the background from these same
@@ -114,7 +166,7 @@ export function DrawCircuitOverlay({ onClose, pickImageOnOpen }: DrawCircuitOver
         // Only one at a time: OCR is slow and the server would queue them up.
         if (items.length > 0 && !prefetchBusyRef.current) {
           prefetchBusyRef.current = true;
-          const result = generateCircuitFromImage(png, undefined, items);
+          const result = generateCircuitFromImage(png, undefined, items, true, modelArg);
           const entry = { version, result, done: false };
           result
             .then(() => (entry.done = true))
@@ -360,7 +412,8 @@ These detected parts aren't drawable on the canvas yet and were skipped:
         png,
         undefined,
         det && det.items.length > 0 ? det.items : undefined,
-        false
+        false,
+        modelArg
       );
       place(quick);
     } catch (err) {
@@ -374,7 +427,7 @@ These detected parts aren't drawable on the canvas yet and were skipped:
     try {
       const full = pre
         ? await pre.result
-        : await generateCircuitFromImage(png, undefined, quick.detections, true);
+        : await generateCircuitFromImage(png, undefined, quick.detections, true, modelArg);
       finish(place(full));
     } catch (err) {
       // Keep the circuit placed with default values.
@@ -445,6 +498,28 @@ These detected parts aren't drawable on the canvas yet and were skipped:
             onChange={(e) => setPenWidth(Number(e.target.value))}
           />
         </label>
+
+        {models.length > 1 && (
+          <label className="draw-model">
+            <span className="field-label">Model</span>
+            <select
+              className="field-input"
+              value={model}
+              onChange={(e) => chooseModel(e.target.value)}
+              disabled={busy}
+              title="Detection model used to recognise the circuit"
+            >
+              <option value="">
+                Default{models.find((m) => m.default) ? ` (${modelLabel(models.find((m) => m.default)!.id)})` : ""}
+              </option>
+              {models.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {modelLabel(m.id)}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
 
         <button
           className={`btn btn-xs rtp-toggle${rtp ? " on" : ""}`}

@@ -36,14 +36,15 @@ export async function generateCircuitFromImage(
   imageDataUrl: string,
   title = "drawn-circuit",
   detections?: Detection[],
-  ocr = true
+  ocr = true,
+  model?: string
 ): Promise<JsonNetlist & { detections?: Detection[] }> {
   let response: Response;
   try {
     response = await fetch(GENERATE_ENDPOINT, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ image: imageDataUrl, title, detections, ocr }),
+      body: JSON.stringify({ image: imageDataUrl, title, detections, ocr, model }),
     });
   } catch {
     throw new Error(
@@ -88,15 +89,35 @@ export interface Detection {
 /** Run component detection only (no wires, no OCR) on a drawing. */
 export async function detectComponents(
   imageDataUrl: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  model?: string
 ): Promise<Detection[]> {
   const response = await fetch(DETECT_ENDPOINT, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ image: imageDataUrl }),
+    body: JSON.stringify({ image: imageDataUrl, model }),
     signal,
   });
   if (!response.ok) throw new Error(`Backend returned ${response.status}`);
   const body = (await response.json()) as { detections: Detection[] };
   return body.detections ?? [];
+}
+
+/** Lists the detection models the backend can use.
+ *  Override with VITE_MODELS_URL in a .env file. */
+export const MODELS_ENDPOINT =
+  import.meta.env.VITE_MODELS_URL ?? GENERATE_ENDPOINT.replace(/generate-circuit$/, "models");
+
+export interface ModelInfo {
+  /** Weights file name; sent back as the `model` field. */
+  id: string;
+  /** True for the model the backend uses when none is chosen. */
+  default: boolean;
+}
+
+export async function fetchModels(signal?: AbortSignal): Promise<ModelInfo[]> {
+  const response = await fetch(MODELS_ENDPOINT, { signal });
+  if (!response.ok) throw new Error(`Backend returned ${response.status}`);
+  const body = (await response.json()) as { models?: ModelInfo[] };
+  return body.models ?? [];
 }
