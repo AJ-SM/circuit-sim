@@ -9,7 +9,8 @@ frontend's loadNetlistJson() can consume it directly.
 The pipeline modules live in the bundled `model/` folder. Its location
 defaults to ./model and can be overridden with CIRCUIT_MODEL_DIR.
 The weights file defaults to the hand-drawn fine-tuned model and can be
-overridden with CIRCUIT_MODEL_WEIGHTS.
+overridden with CIRCUIT_MODEL_WEIGHTS. Any other .pt file in the model folder
+can be chosen per request by its file name (see list_models()).
 """
 
 import os
@@ -27,8 +28,7 @@ MODEL_DIR = Path(
     )
 )
 WEIGHTS = Path(
-    # os.environ.get("CIRCUIT_MODEL_WEIGHTS", MODEL_DIR / "circuit_detector_v2_best.pt")
-    os.environ.get("CIRCUIT_MODEL_WEIGHTS", MODEL_DIR / "circuit_detector_best.pt")
+    os.environ.get("CIRCUIT_MODEL_WEIGHTS", MODEL_DIR / "circuit_yolo11_best.pt")
 )
 
 # Same tuning as circuit_pipeline.py
@@ -47,7 +47,8 @@ ROTATED_WEIGHT    = 0.5
 if str(MODEL_DIR) not in sys.path:
     sys.path.insert(0, str(MODEL_DIR))
 
-_model = None
+# Loaded YOLO models, keyed by weights path (each loaded once on first use).
+_models: dict[Path, object] = {}
 _model_lock = threading.Lock()
 
 
@@ -55,19 +56,39 @@ class RecognitionError(Exception):
     pass
 
 
-def _get_model():
-    """Load the YOLO weights once and reuse them across requests."""
-    global _model
+def list_models() -> list[dict]:
+    """Weights the client may pick: every .pt file in MODEL_DIR (plus the
+    default weights if they live elsewhere). `id` is the file name."""
+    paths = sorted(MODEL_DIR.glob("*.pt")) if MODEL_DIR.is_dir() else []
+    if WEIGHTS.exists() and all(p.resolve() != WEIGHTS.resolve() for p in paths):
+        paths.insert(0, WEIGHTS)
+    return [{"id": p.name, "default": p.resolve() == WEIGHTS.resolve()} for p in paths]
+
+
+def _resolve_weights(model: str | None) -> Path:
+    """Map a model id from the client to a weights path. Only names listed by
+    list_models() are accepted, so a request can't point at arbitrary files."""
+    if not model:
+        return WEIGHTS
+    for p in [WEIGHTS, *(MODEL_DIR.glob("*.pt") if MODEL_DIR.is_dir() else [])]:
+        if p.name == model:
+            return p
+    raise RecognitionError(f"Unknown model '{model}'.")
+
+
+def _get_model(model: str | None = None):
+    """Load the chosen YOLO weights once and reuse them across requests."""
+    weights = _resolve_weights(model)
     with _model_lock:
-        if _model is None:
-            if not WEIGHTS.exists():
+        if weights not in _models:
+            if not weights.exists():
                 raise RecognitionError(
-                    f"Model weights not found at '{WEIGHTS}'. "
+                    f"Model weights not found at '{weights}'. "
                     "Set CIRCUIT_MODEL_WEIGHTS or CIRCUIT_MODEL_DIR."
                 )
             from ultralytics import YOLO
-            _model = YOLO(str(WEIGHTS))
-        return _model
+            _models[weights] = YOLO(str(weights))
+        return _models[weights]
 
 
 def decode_image(data: bytes) -> np.ndarray:
@@ -100,9 +121,10 @@ def _rotate(image: np.ndarray, angle: float):
     return rotated, cv2.invertAffineTransform(m)
 
 
-def _predict(image: np.ndarray, angle: float) -> list[tuple[str, float, np.ndarray]]:
+def _predict(image: np.ndarray, angle: float,
+             model_name: str | None = None) -> list[tuple[str, float, np.ndarray]]:
     """(class, conf, 4x2 corner polygon in original image coords) per box."""
-    model = _get_model()
+    model = _get_model(model_name)
     src, inv = (image, None) if angle == 0 else _rotate(image, angle)
     with _model_lock:
         preds = model.predict(source=src, conf=YOLO_CONF, iou=YOLO_IOU, verbose=False)
@@ -126,7 +148,7 @@ def _same_symbol(a: np.ndarray, b: np.ndarray) -> bool:
     return inter / small > 0.4
 
 
-def detect_boxes(image: np.ndarray, rotations: bool = True) -> list:
+def detect_boxes(image: np.ndarray, rotations: bool = True, model: str | None = None) -> list:
     """YOLO component detection only (no wires, no OCR): fast enough to run
     while the user is still drawing.
 
@@ -141,10 +163,10 @@ def detect_boxes(image: np.ndarray, rotations: bool = True) -> list:
     the bounds so it doesn't cut the wires running past the slanted part."""
     from wire_detector import BoundingBox
 
-    dets = [(*d, 0) for d in _predict(image, 0)]
+    dets = [(*d, 0) for d in _predict(image, 0, model)]
     if rotations:
         for angle in ROTATED_VIEWS:
-            dets += [(*d, angle) for d in _predict(image, angle) if d[0] in ROTATED_CLASSES]
+            dets += [(*d, angle) for d in _predict(image, angle, model) if d[0] in ROTATED_CLASSES]
 
     # Greedy clustering, most confident first.
     clusters: list[list[tuple]] = []
@@ -251,7 +273,7 @@ def _rename(components, conn_result, topology, names: dict[str, str]) -> None:
 
 
 def recognize(image: np.ndarray, title: str = "drawn-circuit", boxes: list | None = None,
-              ocr: bool = True) -> dict:
+              ocr: bool = True, model: str | None = None) -> dict:
     """Run the full pipeline and return the netlist JSON dict. `boxes` are
     detections already made on this image (run-time processing); when given,
     detection is skipped. With `ocr=False` the slow value/name reading is
@@ -264,7 +286,7 @@ def recognize(image: np.ndarray, title: str = "drawn-circuit", boxes: list | Non
 
     # ── 1. Component detection ──────────────────────────────────
     if boxes is None:
-        boxes = detect_boxes(image)
+        boxes = detect_boxes(image, model=model)
 
     if not boxes:
         raise RecognitionError(

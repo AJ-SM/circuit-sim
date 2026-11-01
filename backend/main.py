@@ -420,6 +420,8 @@ class GenerateCircuitRequest(BaseModel):
     detections: list[dict[str, Any]] | None = None
     # False: skip reading values/names (fast first pass; defaults are used).
     ocr: bool = True
+    # Weights file name from GET /models; None uses the default model.
+    model: str | None = None
 
 def _decode_request_image(req: GenerateCircuitRequest):
     import base64
@@ -452,7 +454,7 @@ def detect_components(req: GenerateCircuitRequest) -> dict[str, Any]:
         _decode_request_image(req)  # reject bad base64 here with a 400
         try:
             job = detect_components_job.apply_async(
-                args=[{"image": req.image}], expires=DETECT_EXPIRES_S)
+                args=[{"image": req.image, "model": req.model}], expires=DETECT_EXPIRES_S)
         except Exception as exc:
             raise HTTPException(status_code=503,
                                 detail="The inference queue is unavailable.") from exc
@@ -469,7 +471,7 @@ def detect_components(req: GenerateCircuitRequest) -> dict[str, Any]:
     from recognizer import RecognitionError, box_to_json, detect_boxes
     image = _decode_request_image(req)
     try:
-        boxes = detect_boxes(image)
+        boxes = detect_boxes(image, model=req.model)
     except RecognitionError as e:
         raise HTTPException(status_code=422, detail=str(e))
     h, w = image.shape[:2]
@@ -478,10 +480,24 @@ def detect_components(req: GenerateCircuitRequest) -> dict[str, Any]:
         "detections": [box_to_json(b) for b in boxes],
     }
 
+@app.get("/models")
+def list_models() -> dict[str, Any]:
+    """Detection models the frontend can choose from (.pt files in the
+    model folder); `id` is what goes in the request's `model` field."""
+    from recognizer import list_models as _list
+    return {"models": _list()}
+
+
 @app.post("/generate-circuit", status_code=status.HTTP_202_ACCEPTED)
 def generate_circuit(req: GenerateCircuitRequest) -> dict[str, str]:
     """Queue recognition and return immediately; workers do the CPU work."""
     from jobs import generate_circuit_job, submit_local
+    from recognizer import RecognitionError, _resolve_weights
+
+    try:
+        _resolve_weights(req.model)  # reject an unknown model with a 400 now
+    except RecognitionError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     try:
         if os.environ.get("CIRCUIT_QUEUE_MODE", "local").lower() == "celery":

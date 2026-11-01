@@ -78,6 +78,7 @@ Schematic on canvas  ──► Frontend (React) ──► POST /simulate        
 | `model/terminal_extractor.py` | Component pin and terminal extraction from bounding boxes |
 | `model/connectivity_graph.py` | Builds nets from pins and wires |
 | `model/netlist_generator.py` | Produces the final netlist and SPICE lines |
+| `model/circuit_yolo11_best.pt` | YOLO11 weights (default) |
 | `model/circuit_detector_v2_best.pt` | YOLO weights v2 (9 classes, hand-drawn fine-tune) |
 | `model/circuit_detector_best.pt` | YOLO weights v1 (8 classes) |
 | `README.md`, `BACKEND_SUMMARY.md` | Backend documentation |
@@ -123,7 +124,7 @@ Analysis run: DC operating point (`.op`).
 
 **Classes (v2):** AC Source, Battery, Capacitor, Diode, Ground, Inductor, Resistor, Voltage, Dep. Voltage.
 
-> Note: `README.md` and `BACKEND_SUMMARY.md` say the backend uses `circuit_detector_v2_best.pt`, but `recognizer.py:31` currently defaults to `circuit_detector_best.pt` (v1). The v2 line is commented out. Set `CIRCUIT_MODEL_WEIGHTS` to choose explicitly.
+> The backend defaults to `circuit_yolo11_best.pt` (override with `CIRCUIT_MODEL_WEIGHTS`). Every `.pt` file in `model/` is listed by `GET /models`, and the frontend's Model dropdown picks one per request.
 
 ### 3.2 OCR models (optional)
 
