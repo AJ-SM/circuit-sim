@@ -522,7 +522,7 @@ The full 10 V is dropped across R1 (2 V) and R2 (8 V). None of it is dropped alo
 - **Floating or singular circuits** (a node with no DC path to ground, a loop of ideal voltage sources) make ngspice fail, and the user sees `ok: false` with ngspice's error lines.
 - **Transistors** are a generic BJT model (only β is editable); there are no MOSFETs.
 - **Op-amps** are ideal apart from gain and output limits: no supply pins, no bandwidth/slew rate, no input offset or bias current. Their output current returns through the ground net, so in a circuit with no ground symbol the wire currents of that net can't balance exactly.
-- **Image import** doesn't create transistors or op-amps yet: the recognition pipeline gives every part two terminals, so a detected transistor or op-amp is skipped (bridged) like other parts the canvas can't place, and the CircuitJS export leaves them out.
+- **Image import** places transistors and op-amps only with a model that detects them (`circuit_yolo11_v4_best.pt`). Which leg is the emitter, NPN vs PNP, and which op-amp input is `+` are worked out from the wiring and the drawing (see `backend/BACKEND_SUMMARY.md` §4, stages 7d–7e) and can be wrong on small or unusual symbols; the part can be swapped in the editor. The CircuitJS export still leaves them out.
 
 ---
 

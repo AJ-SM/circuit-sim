@@ -36,6 +36,15 @@ DEFAULT_VALUES = {
     "Voltage"   : "DC 5",
     "AC Source" : "AC 1 SIN(0 5 1k)",
     "Ground"    : "",        # Ground has no value
+    "Transistor": "",        # model (NPN/PNP) instead of a value
+    "Op-Amp"    : "",
+}
+
+# Three-terminal parts: their pins, in the order the JSON and SPICE line use.
+# net_pos / net_neg hold the first two (collector-emitter, + and - input).
+MULTI_PIN = {
+    "Transistor": ("C", "E", "B"),
+    "Op-Amp"    : ("+", "-", "out"),
 }
 
 # SPICE element type prefix per class
@@ -62,8 +71,18 @@ class NetlistEntry:
     net_pos  : str    # positive/A terminal net name
     net_neg  : str    # negative/B terminal net name
     value    : str    # e.g. "1k", "10u", "DC 5"
+    pin_nets : Optional[Dict[str, str]] = None   # every pin's net (3-pin parts)
+    subtype  : str = ""                          # "npn" / "pnp" for a transistor
 
     def to_spice_line(self) -> str:
+        n = self.pin_nets or {}
+        if self.cls_name == "Transistor":
+            # Q<name> collector base emitter model
+            return (f"{self.ref_des} {n.get('C', '?')} {n.get('B', '?')} {n.get('E', '?')} "
+                    f"{(self.subtype or 'npn').upper()}")
+        if self.cls_name == "Op-Amp":
+            # informative: non-inverting, inverting, output
+            return f"{self.ref_des} {n.get('+', '?')} {n.get('-', '?')} {n.get('out', '?')} OPAMP"
         if self.cls_name == "Diode":
             return f"{self.ref_des} {self.net_pos} {self.net_neg} {DIODE_MODEL}"
         return f"{self.ref_des} {self.net_pos} {self.net_neg} {self.value}"
@@ -88,7 +107,7 @@ class Netlist:
         lines.append("")
 
         for cls in ["Voltage", "Battery", "AC Source", "Resistor",
-                    "Capacitor", "Inductor", "Diode"]:
+                    "Capacitor", "Inductor", "Diode", "Transistor", "Op-Amp"]:
             group = [e for e in self.entries if e.cls_name == cls]
             if group:
                 lines.append(f"* --- {cls}s ---")
@@ -145,6 +164,8 @@ class Netlist:
                     "net_pos"   : e.net_pos,
                     "net_neg"   : e.net_neg,
                     "spice_line": e.to_spice_line(),
+                    **({"pins": e.pin_nets} if e.pin_nets else {}),
+                    **({"subtype": e.subtype} if e.subtype else {}),
                 }
                 for e in self.entries
             ],
@@ -199,8 +220,14 @@ class NetlistGenerator:
             # Get pin net names
             net_pos, net_neg = self._get_pin_nets(comp, pin_to_net)
 
+            pin_nets = None
+            if cls in MULTI_PIN:
+                pin_nets = {p: pin_to_net.get(f"{comp.component_id}.{p}", "?")
+                            for p in MULTI_PIN[cls]}
+
             # Skip floating components (not connected to any net)
-            if net_pos == "?" and net_neg == "?":
+            if (all(v == "?" for v in pin_nets.values()) if pin_nets
+                    else net_pos == "?" and net_neg == "?"):
                 print(f"  [WARN] {comp.component_id} ({cls}) is not connected — skipping")
                 continue
 
@@ -213,6 +240,8 @@ class NetlistGenerator:
                 net_pos  = net_pos,
                 net_neg  = net_neg,
                 value    = value,
+                pin_nets = pin_nets,
+                subtype  = getattr(comp, "subtype", "") or "",
             ))
 
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -242,6 +271,9 @@ class NetlistGenerator:
             return nets.get("anode", "?"), nets.get("cathode", "?")
         elif cls in ("Battery", "Voltage", "AC Source"):
             return nets.get("+", "?"), nets.get("-", "?")
+        elif cls in MULTI_PIN:
+            first, second = MULTI_PIN[cls][:2]
+            return nets.get(first, "?"), nets.get(second, "?")
         else:
             # Standard 2-terminal: A → positive, B → negative
             return nets.get("A", "?"), nets.get("B", "?")
@@ -251,7 +283,7 @@ class NetlistGenerator:
         cls     = comp.cls_name
         default = DEFAULT_VALUES.get(cls, "1")
 
-        if not self.interactive or cls in ("Ground", "Diode"):
+        if not self.interactive or cls in ("Ground", "Diode", *MULTI_PIN):
             return default
 
         # Build prompt

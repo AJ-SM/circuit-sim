@@ -63,6 +63,8 @@ REFDES_PREFIX = {
     "Voltage"   : "V",
     "AC Source" : "V",
     "Ground"    : "GND",
+    "Transistor": "Q",
+    "Op-Amp"    : "U",
 }
 
 

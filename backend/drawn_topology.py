@@ -36,6 +36,10 @@ from terminal_extractor import REFDES_PREFIX, ComponentTerminal, Pin
 from wire_detector import BoundingBox
 
 SOURCE_CLASSES = ("Battery", "Voltage", "AC Source")
+# Three-terminal parts. Their pins are found from the wire contacts and the
+# symbol's shape (see _transistor_pins / _opamp_pins).
+TRANSISTOR = "Transistor"
+OPAMP = "Op-Amp"
 
 
 @dataclass
@@ -111,6 +115,8 @@ class DrawnTopology:
         self.stroke = max(2.0, 2.0 * float(np.median(dist[skel]))) if skel.any() else 3.0
         # ref_des → how a source's polarity was decided: "marks" | "plates" | "default"
         self.polarity_method: dict[str, str] = {}
+        # ref_des → how a transistor's emitter was picked: "wiring" | "arrow" | "default"
+        self.transistor_method: dict[str, str] = {}
 
     # ── box tightening ────────────────────────────────────────────
     def _tighten(self, box: BoundingBox) -> BoundingBox:
@@ -119,8 +125,10 @@ class DrawnTopology:
         running along its side), splitting nets. Pull each edge in while the
         stroke-wide strip along it holds only wire ink (see `wire_only`), at
         most 30 % per side. Slanted (polygon) boxes are already tight;
-        grounds keep their box (their bars are short runs that would peel)."""
-        if getattr(box, "poly", None) is not None or box.cls_name == "Ground":
+        grounds keep their box (their bars are short runs that would peel).
+        So do transistors and op-amps: the peeling rules assume two leads on
+        opposite edges, and their pins are found from the box's shape."""
+        if getattr(box, "poly", None) is not None or box.cls_name in ("Ground", TRANSISTOR, OPAMP):
             return box
         h, w = self.ink.shape
         x1, y1, x2, y2 = max(box.x1, 0), max(box.y1, 0), min(box.x2, w), min(box.y2, h)
@@ -316,9 +324,23 @@ class DrawnTopology:
         counters: dict[str, int] = {}
         components: list[ComponentTerminal] = []
         pin_blob: dict[str, int | None] = {}
+        # Transistors are finished after the other parts: which leg is the
+        # emitter can depend on what it is wired to (ground, a supply).
+        transistors: list[tuple[ComponentTerminal, list[int | None]]] = []
 
         for b in boxes:
-            pins, blobs = self._make_pins(b, contacts[id(b)])
+            if b.cls_name == TRANSISTOR:
+                prefix = REFDES_PREFIX.get(b.cls_name, "Q")
+                counters[prefix] = counters.get(prefix, 0) + 1
+                comp = ComponentTerminal(f"{prefix}{counters[prefix]}", b.cls_name, b, [])
+                comp.pins, blobs = self._transistor_pins(b, contacts[id(b)])
+                components.append(comp)
+                transistors.append((comp, blobs))
+                continue
+            if b.cls_name == OPAMP:
+                pins, blobs, sign_method = self._opamp_pins(b, contacts[id(b)])
+            else:
+                pins, blobs = self._make_pins(b, contacts[id(b)])
             if b.cls_name == "Capacitor" and self._looks_like_battery(b, pins):
                 # The detector often calls a battery a capacitor.
                 b.cls_name = "Battery"
@@ -329,6 +351,8 @@ class DrawnTopology:
             if b.cls_name in SOURCE_CLASSES:
                 pins, method = self._orient_source(b, pins)
                 self.polarity_method[ref] = method
+            elif b.cls_name == OPAMP:
+                self.polarity_method[ref] = sign_method
             elif b.cls_name == "Diode" and self._diode_reversed(b, pins):
                 # names only; list order stays positional (paired with blobs)
                 pins = [Pin("cathode" if p.name == "anode" else "anode", p.x, p.y) for p in pins]
@@ -336,24 +360,302 @@ class DrawnTopology:
             for p, blob in zip(pins, blobs):
                 pin_blob[f"{ref}.{p.name}"] = blob
 
+        # Wires that are ground / a source's - end ("low") or a source's +
+        # end ("high"), for picking each transistor's emitter.
+        low, high = set(), set()
+        for comp in components:
+            for p in comp.pins:
+                blob = pin_blob.get(f"{comp.component_id}.{p.name}")
+                if blob is None:
+                    continue
+                if p.name == "GND" or (comp.cls_name in SOURCE_CLASSES and p.name == "-"):
+                    low.add(blob)
+                elif comp.cls_name in SOURCE_CLASSES and p.name == "+":
+                    high.add(blob)
+        for comp, blobs in transistors:
+            comp.pins, comp.subtype, self.transistor_method[comp.component_id] = \
+                self._name_transistor(comp.box, comp.pins, blobs, low, high)
+            for p, blob in zip(comp.pins, blobs):
+                pin_blob[f"{comp.component_id}.{p.name}"] = blob
+
         return components, self._nets(components, pin_blob), dropped
+
+    @staticmethod
+    def _edge_point(poly: np.ndarray, x: float, y: float) -> tuple[int, int]:
+        """Project a point onto the nearest point of the outline `poly`."""
+        best, best_d = (x, y), np.inf
+        for (ax, ay), (bx, by) in zip(poly, np.roll(poly, -1, axis=0)):
+            dx, dy = bx - ax, by - ay
+            t = ((x - ax) * dx + (y - ay) * dy) / max(dx * dx + dy * dy, 1e-9)
+            t = min(max(t, 0.0), 1.0)
+            px, py = ax + t * dx, ay + t * dy
+            d = (px - x) ** 2 + (py - y) ** 2
+            if d < best_d:
+                best, best_d = (px, py), d
+        return int(round(best[0])), int(round(best[1]))
+
+    # ── transistors ───────────────────────────────────────────────
+    def _transistor_pins(self, box: BoundingBox, contacts: list[_Contact]):
+        """Base and the two other legs, as pins named "B", "L1", "L2" (the
+        legs are named C / E later by _name_transistor). The base is the
+        apex of the three contacts: in the symbol the collector and emitter
+        mirror each other across the base lead, so the base is about equally
+        far from both. A leg that touches no wire floats where it would be."""
+        poly = box_poly(box).astype(np.float64)
+        cx, cy = poly[:, 0].mean(), poly[:, 1].mean()
+        W = max(float(poly[:, 0].max() - poly[:, 0].min()), 1.0)
+        H = max(float(poly[:, 1].max() - poly[:, 1].min()), 1.0)
+        x1, y1 = poly[:, 0].min(), poly[:, 1].min()
+        x2, y2 = poly[:, 0].max(), poly[:, 1].max()
+        on_edge = lambda x, y: self._edge_point(poly, x, y)
+        dist = lambda a, b: float(np.hypot(a[0] - b[0], a[1] - b[1]))
+
+        pts = [(c.x, c.y) for c in contacts]
+        blobs: list[int | None] = [c.blob for c in contacts]
+
+        if len(pts) >= 3:
+            # the three contacts spanning the most (stubs and noise sit close)
+            trio = max(
+                ((i, j, k) for i in range(len(pts)) for j in range(i + 1, len(pts))
+                 for k in range(j + 1, len(pts))),
+                key=lambda t: dist(pts[t[0]], pts[t[1]]) + dist(pts[t[1]], pts[t[2]])
+                + dist(pts[t[0]], pts[t[2]]),
+            )
+
+            def skew(i: int) -> float:
+                a, b = [pts[j] for j in trio if j != i]
+                da, db = dist(pts[i], a), dist(pts[i], b)
+                return abs(da - db) / max(da, db, 1e-9)
+
+            base = min(trio, key=skew)
+            legs = [j for j in trio if j != base]
+            chosen = [(pts[base], blobs[base]), (pts[legs[0]], blobs[legs[0]]),
+                      (pts[legs[1]], blobs[legs[1]])]
+        elif len(pts) == 2:
+            a, b = pts
+            # Lined up across the symbol (one above the other, or side by
+            # side): the collector and emitter; the base floats beside them.
+            same_x = abs(a[0] - b[0]) < 0.3 * W
+            same_y = abs(a[1] - b[1]) < 0.3 * H
+            if same_x:
+                bx = x1 if (a[0] + b[0]) / 2 >= cx else x2
+                chosen = [((bx, (a[1] + b[1]) / 2), None), (a, blobs[0]), (b, blobs[1])]
+            elif same_y:
+                by = y1 if (a[1] + b[1]) / 2 >= cy else y2
+                chosen = [(((a[0] + b[0]) / 2, by), None), (a, blobs[0]), (b, blobs[1])]
+            else:
+                # One is the base: it sits on the symbol's middle line, the
+                # legs near the corners. The missing leg mirrors the other.
+                off = lambda p: min(abs(p[0] - cx) / W, abs(p[1] - cy) / H)
+                bi = 0 if off(a) <= off(b) else 1
+                base_p, leg_p = pts[bi], pts[1 - bi]
+                if abs(base_p[1] - cy) / H <= abs(base_p[0] - cx) / W:
+                    other = (leg_p[0], 2 * cy - leg_p[1])     # base on the left/right
+                else:
+                    other = (2 * cx - leg_p[0], leg_p[1])     # base on top/bottom
+                chosen = [(base_p, blobs[bi]), (leg_p, blobs[1 - bi]), (other, None)]
+        else:
+            # Only the base is wired (or one leg; can't tell): legs float on
+            # the opposite side.
+            p = pts[0]
+            if abs(p[0] - cx) / W >= abs(p[1] - cy) / H:
+                lx = x2 if p[0] < cx else x1
+                legs_p = [(lx, y1 + 0.15 * H), (lx, y2 - 0.15 * H)]
+            else:
+                ly = y2 if p[1] < cy else y1
+                legs_p = [(x1 + 0.15 * W, ly), (x2 - 0.15 * W, ly)]
+            chosen = [(p, blobs[0]), (legs_p[0], None), (legs_p[1], None)]
+
+        pins = [Pin(name, *on_edge(*xy)) for name, (xy, _) in zip(("B", "L1", "L2"), chosen)]
+        return pins, [blob for _, blob in chosen]
+
+    def _name_transistor(self, box: BoundingBox, pins: list[Pin], blobs: list[int | None],
+                         low: set, high: set) -> tuple[list[Pin], str, str]:
+        """Name the legs C / E and decide NPN or PNP. Returns (pins in the
+        same order, "npn" | "pnp", method).
+          wiring:  a leg on a ground / source − wire is an NPN emitter; a leg
+                   on a source + wire (with the other not) is a PNP emitter.
+          arrow:   the emitter's arrowhead adds ink to its half of the symbol.
+          default: the lower leg is the emitter.
+        Without wiring the type follows the usual drawing: NPN with its
+        emitter at the bottom, PNP with it at the top."""
+        b, l1, l2 = pins
+        on = lambda s: [blobs[1] in s and blobs[1] is not None,
+                        blobs[2] in s and blobs[2] is not None]
+        lo, hi = on(low), on(high)
+        H = max(box.y2 - box.y1, 1)
+        if lo[0] != lo[1]:
+            e, kind, method = (0 if lo[0] else 1), "npn", "wiring"
+        elif hi[0] != hi[1]:
+            e, kind, method = (0 if hi[0] else 1), "pnp", "wiring"
+        else:
+            e = self._denser_leg(box, l1, l2)
+            method = "arrow" if e is not None else "default"
+            if e is None:
+                e = 0 if (l1.y, l1.x) > (l2.y, l2.x) else 1
+            em, co = (l1, l2) if e == 0 else (l2, l1)
+            kind = "pnp" if em.y < co.y - 0.2 * H else "npn"
+        names = ("E", "C") if e == 0 else ("C", "E")
+        return [Pin("B", b.x, b.y), Pin(names[0], l1.x, l1.y), Pin(names[1], l2.x, l2.y)], kind, method
+
+    def _denser_leg(self, box: BoundingBox, l1: Pin, l2: Pin) -> int | None:
+        """0 or 1: the leg carrying clearly more ink (the emitter's
+        arrowhead), or None when the two are about even. Only ink along each
+        leg counts: a band from the leg's pin to near the symbol's centre,
+        leaving out the lead and the circle. (The base bar adds the same to
+        both legs; a PNP arrowhead sits right next to it.)"""
+        crop = self._crop(box)
+        ys, xs = np.nonzero(crop)
+        if xs.size < 20:
+            return None
+        xs = xs + max(box.x1, 0)
+        ys = ys + max(box.y1, 0)
+        cx, cy = (box.x1 + box.x2) / 2, (box.y1 + box.y2) / 2
+        size = max(box.x2 - box.x1, box.y2 - box.y1)
+
+        def leg_ink(p: Pin) -> int:
+            dx, dy = cx - p.x, cy - p.y
+            n2 = max(dx * dx + dy * dy, 1e-9)
+            t = ((xs - p.x) * dx + (ys - p.y) * dy) / n2
+            perp = np.abs((xs - p.x) * dy - (ys - p.y) * dx) / np.sqrt(n2)
+            return int(np.count_nonzero((t > 0.15) & (t < 0.95) & (perp < 0.12 * size)))
+
+        n1, n2 = leg_ink(l1), leg_ink(l2)
+        if max(n1, n2) < 1.15 * max(min(n1, n2), 1):
+            return None
+        return 0 if n1 > n2 else 1
+
+    # ── op-amps ───────────────────────────────────────────────────
+    def _opamp_pins(self, box: BoundingBox, contacts: list[_Contact]):
+        """Pins "+", "-", "out" (in that order) of a triangle symbol.
+        Which way the triangle points comes from the ink: its width across
+        the axis shrinks from the flat input side to the output tip. The
+        output is the contact at the tip; the inputs are on the flat side
+        (supply pins, on the slanted sides, are left out). Without a clear
+        shape and with three contacts, the inputs are the closest pair.
+        + and − come from the drawn signs, else the upper (or left) input
+        is −, as most schematics draw it."""
+        poly = box_poly(box).astype(np.float64)
+        x1, y1 = poly[:, 0].min(), poly[:, 1].min()
+        x2, y2 = poly[:, 0].max(), poly[:, 1].max()
+        on_edge = lambda x, y: self._edge_point(poly, x, y)
+
+        horizontal, tip_high = self._triangle_axis(box)
+        if horizontal is None and len(contacts) >= 3:
+            # three biggest contacts; the closest pair are the inputs
+            trio = sorted(contacts, key=lambda c: -c.size)[:3]
+            pairs = [(0, 1), (0, 2), (1, 2)]
+            i, j = min(pairs, key=lambda p: (trio[p[0]].x - trio[p[1]].x) ** 2
+                       + (trio[p[0]].y - trio[p[1]].y) ** 2)
+            out_c = trio[3 - i - j]
+            mid = ((trio[i].x + trio[j].x) / 2, (trio[i].y + trio[j].y) / 2)
+            horizontal = abs(out_c.x - mid[0]) >= abs(out_c.y - mid[1])
+            tip_high = (out_c.x > mid[0]) if horizontal else (out_c.y > mid[1])
+        if horizontal is None:
+            horizontal, tip_high = True, True          # usual: pointing right
+
+        lo_a, hi_a = (x1, x2) if horizontal else (y1, y2)
+        lo_c, hi_c = (y1, y2) if horizontal else (x1, x2)
+        span = max(hi_a - lo_a, 1.0)
+        along = lambda c: ((c.x if horizontal else c.y) - lo_a) / span
+        t = lambda c: along(c) if tip_high else 1.0 - along(c)   # 0 flat side, 1 tip
+        across = lambda c: c.y if horizontal else c.x
+        mid_c = (lo_c + hi_c) / 2
+        point = lambda a, s: (a, s) if horizontal else (s, a)    # (along, across) -> x, y
+        tip_a = hi_a if tip_high else lo_a
+        flat_a = lo_a if tip_high else hi_a
+
+        tips = [c for c in contacts if t(c) > 0.7]
+        flats = [c for c in contacts if t(c) < 0.3]
+        out_c = min(tips, key=lambda c: abs(across(c) - mid_c)) if tips else None
+        ins = sorted(flats, key=lambda c: -c.size)[:2]
+
+        out = ((out_c.x, out_c.y), out_c.blob) if out_c else (point(tip_a, mid_c), None)
+        if len(ins) == 2:
+            inputs = [((c.x, c.y), c.blob) for c in ins]
+        elif len(ins) == 1:
+            c = ins[0]
+            s = 2 * mid_c - across(c)
+            if abs(s - across(c)) < 0.2 * (hi_c - lo_c):   # it sat in the middle
+                s = across(c) + 0.4 * (hi_c - lo_c) * (1 if across(c) < mid_c else -1)
+            inputs = [((c.x, c.y), c.blob), (point(flat_a, s), None)]
+        else:
+            q = 0.2 * (hi_c - lo_c)
+            inputs = [(point(flat_a, lo_c + q), None), (point(flat_a, hi_c - q), None)]
+
+        # which input is +
+        ac = [(p[1] if horizontal else p[0]) for p, _ in inputs]
+        votes = []
+        for sign, mx, my in self._sign_marks(box):
+            m = my + max(box.y1, 0) if horizontal else mx + max(box.x1, 0)
+            near = 0 if abs(m - ac[0]) <= abs(m - ac[1]) else 1
+            votes.append(near if sign == "+" else 1 - near)    # index of the + input
+        if votes and len(set(votes)) == 1:
+            plus, method = votes[0], "marks"
+        else:
+            plus, method = (1 if ac[0] < ac[1] else 0), "default"   # upper/left is −
+        ordered = [inputs[plus], inputs[1 - plus], out]
+        pins = [Pin(n, *on_edge(*xy)) for n, (xy, _) in zip(("+", "-", "out"), ordered)]
+        return pins, [blob for _, blob in ordered], method
+
+    def _triangle_axis(self, box: BoundingBox) -> tuple[bool | None, bool | None]:
+        """(horizontal, tip_high) of a triangle symbol from its ink: the
+        triangle's width across its axis shrinks steadily towards the tip.
+        tip_high is True when the tip is at the right / bottom. (None, None)
+        when neither axis narrows clearly."""
+        crop = self._crop(box).astype(bool)
+        best = (None, None, 1.3)                 # needs ≥ 1.3× narrowing
+        for horizontal in (True, False):
+            src = crop if horizontal else crop.T  # columns step along the axis
+            n = src.shape[1]
+            if n < 10 or src.shape[0] < 8:
+                continue
+            span = np.zeros(n)
+            for i in range(n):
+                rows = np.flatnonzero(src[:, i])
+                if rows.size:
+                    span[i] = rows[-1] - rows[0] + 1
+            low = float(span[int(0.15 * n):int(0.35 * n)].mean())
+            high = float(span[int(0.65 * n):int(0.85 * n)].mean())
+            ratio = max(low, high) / max(min(low, high), 1.0)
+            if ratio > best[2]:
+                best = (horizontal, high < low, ratio)
+        return best[0], best[1]
+
+    def _sign_marks(self, box: BoundingBox) -> list[tuple[str, float, float]]:
+        """Drawn "+" / "−" marks inside a symbol, as (sign, x, y) in the
+        crop's coordinates. Marks are small blobs not touching the box edge
+        (so not an outline or the leads); a squarish, sparse blob is "+", a
+        flat bar is "−"."""
+        crop = self._crop(box)
+        h, w = crop.shape
+        size = max(h, w)
+        if size < 12:
+            return []
+        # join the two strokes of a "+" that don't quite touch
+        k = max(3, size // 40) | 1
+        joined = cv2.dilate(crop, np.ones((k, k), np.uint8))
+        n, lab, stats, cents = cv2.connectedComponentsWithStats(joined, connectivity=8)
+        marks = []
+        for i in range(1, n):
+            x, y, bw, bh, _ = stats[i]
+            if x <= 1 or y <= 1 or x + bw >= w - 1 or y + bh >= h - 1:
+                continue                      # touches the edge: outline / lead
+            longest, shortest = max(bw, bh), max(min(bw, bh), 1)
+            if longest > 0.45 * size or longest < 0.06 * size:
+                continue                      # too big (outline) or a speck
+            ink = int(np.count_nonzero(crop[lab == i]))
+            fill = ink / float(bw * bh)
+            if longest / shortest >= 2.5 and bw > bh:
+                marks.append(("-", float(cents[i][0]), float(cents[i][1])))
+            elif longest / shortest < 1.8 and fill < 0.55:
+                marks.append(("+", float(cents[i][0]), float(cents[i][1])))
+        return marks
 
     def _make_pins(self, box: BoundingBox, contacts: list[_Contact]):
         poly = box_poly(box).astype(np.float64)
         cx, cy = poly[:, 0].mean(), poly[:, 1].mean()
-
-        def on_edge(x: float, y: float) -> tuple[int, int]:
-            """Project a contact onto the nearest point of the outline."""
-            best, best_d = (x, y), np.inf
-            for (ax, ay), (bx, by) in zip(poly, np.roll(poly, -1, axis=0)):
-                dx, dy = bx - ax, by - ay
-                t = ((x - ax) * dx + (y - ay) * dy) / max(dx * dx + dy * dy, 1e-9)
-                t = min(max(t, 0.0), 1.0)
-                px, py = ax + t * dx, ay + t * dy
-                d = (px - x) ** 2 + (py - y) ** 2
-                if d < best_d:
-                    best, best_d = (px, py), d
-            return int(round(best[0])), int(round(best[1]))
+        on_edge = lambda x, y: self._edge_point(poly, x, y)
 
         if box.cls_name == "Ground":
             c = max(contacts, key=lambda c: c.size)
@@ -452,32 +754,12 @@ class DrawnTopology:
         """Look for a drawn "+" / "−" inside the symbol (circle-style sources).
         Marks are small blobs not touching the box edge (so not the circle
         ring or the leads); a squarish, sparse blob is "+", a flat bar is "−"."""
-        crop = self._crop(box)
-        h, w = crop.shape
-        size = max(h, w)
-        if size < 12:
-            return None
-        # join the two strokes of a "+" that don't quite touch
-        k = max(3, size // 40) | 1
-        joined = cv2.dilate(crop, np.ones((k, k), np.uint8))
-        n, lab, stats, cents = cv2.connectedComponentsWithStats(joined, connectivity=8)
         plus_t, minus_t = [], []
-        for i in range(1, n):
-            x, y, bw, bh, _ = stats[i]
-            if x <= 1 or y <= 1 or x + bw >= w - 1 or y + bh >= h - 1:
-                continue                      # touches the edge: ring / lead
-            longest, shortest = max(bw, bh), max(min(bw, bh), 1)
-            if longest > 0.45 * size or longest < 0.06 * size:
-                continue                      # too big (ring) or a speck
-            ink = int(np.count_nonzero(crop[lab == i]))
-            fill = ink / float(bw * bh)
-            t = self._along(box, pos, neg, *cents[i])
+        for sign, mx, my in self._sign_marks(box):
+            t = self._along(box, pos, neg, mx, my)
             if abs(t - 0.5) < 0.1:
                 continue                      # centred mark says nothing about ends
-            if longest / shortest >= 2.5 and bw > bh:
-                minus_t.append(t)
-            elif longest / shortest < 1.8 and fill < 0.55:
-                plus_t.append(t)
+            (plus_t if sign == "+" else minus_t).append(t)
         # t < 0.5 → nearer `pos` (the default + end)
         votes = [t < 0.5 for t in plus_t] + [t >= 0.5 for t in minus_t]
         if not votes or (any(votes) and not all(votes)):

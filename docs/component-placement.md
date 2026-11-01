@@ -66,8 +66,9 @@ Each entry of `component_details` carries the geometry used for placement:
 ```
 netlist JSON
    │
-   ├─ 1. bridgeSkippedComponentNets   unsupported parts (e.g. transistors) become shorts
-   ├─ 2. typeToKind                   "Resistor" → resistor, "Voltage" → vsource_dc, ...
+   ├─ 1. bridgeSkippedComponentNets   unsupported parts (e.g. LEDs, switches) become shorts
+   ├─ 2. typeToKind                   "Resistor" → resistor, "Voltage" → vsource_dc,
+   │                                  "Transistor" + subtype → bjt_npn / bjt_pnp, "Op-Amp" → opamp
    ├─ 3. choose layout strategy       photo / topology / auto-grid       (§4)
    ├─ 4. position + orient each part                                     (§5, §6, §7)
    ├─ 5. build wires from net ids                                        (§8)
@@ -191,7 +192,11 @@ Parts pointing left are **mirrored instead of rotated by 180°**, so the symbol 
 
 A diagonal part puts its pins on the grid diagonal, so it is drawn √2 longer along its axis.
 
-Parts without exactly two pins matching the definition (**Ground**, for example) keep `rotation 0`.
+**Three-pin parts** (transistors, op-amps) use `applyMultiPinOrientation()` instead. For each of the four rotations, mirrored or not, it compares the direction of every definition pin from the part's centre with the direction of the matching detected pin from the bbox centre (cosine similarity, summed), and keeps the best. So a transistor drawn with its base on the right is mirrored, and an op-amp pointing left is turned 180°.
+
+Pin names are matched case-insensitively, and the backend's ASCII `-` matches the op-amp's `−` pin (`normPinName`).
+
+Parts with a single pin (**Ground**) keep `rotation 0`.
 
 ---
 
@@ -293,6 +298,7 @@ V1 and C1 end up on the same row (y = 12), even though their drawn centres diffe
 - **No overlap resolution in the photo layout.** If the drawing itself has crossing or overlapping wires, they stay that way.
 - **One bad detail switches the whole layout.** If any placed part lacks pins, the whole circuit uses the topology loop layout and the drawn arrangement is lost.
 - **Unsupported parts are bridged.** Kinds the canvas can't draw (`typeToKind` returns `null`) are skipped, and their two nets are merged, so the loop still closes. The parts are listed to the user afterwards.
+- **Three-pin parts are drawn at their fixed size.** A transistor is 2 × 2 grid units and an op-amp 4 × 2.5, wherever the drawn symbol's pins were; wires are routed to the placed pins.
 
 ---
 
@@ -302,23 +308,25 @@ All functions are in `frontend/src/utils/loadNetlistJson.ts` unless noted. Line 
 
 | Function / constant | Line | Role |
 |---|---|---|
-| `typeToKind` | 136 | Backend class name → `ComponentKind` |
-| `bridgeSkippedComponentNets` | 217 | Merges nets across unsupported parts |
-| `CANVAS_MARGIN`, `TARGET_W`, `TARGET_H` | 266 | Target layout area |
-| `MIN_GRID_PER_PART` | 276 | Minimum part spacing |
-| `medianPartLengthPx` | 279 | Typical drawn part length |
-| `clusterTolerancePx` | 292 | Clustering tolerance |
-| `clusterValues` | 312 | 1-D clustering |
-| `buildPixelToGrid` | 337 | Scale, offset and snap transform |
-| `DIAGONAL_TOLERANCE_DEG` | 405 | Diagonal detection |
-| `computeOrientationFromPixels` | 407 | Rotation and mirroring from the pin direction |
-| `applyPixelOrientation` | 433 | Applies it to an instance |
-| `autoLayout` | 449 | Grid fallback |
-| `traceSeriesChain` | 481 | Loop order for the topology fallback |
-| `placeInLoop` | 544 | Rectangle placement for the topology fallback |
-| `buildWiresFromPinNetIds` | 597 | Primary wire builder |
-| `buildWiresFromSegments` | 648 | Ink-segment wire builder |
-| `buildWiresFromNets` | 728 | `nets[]` wire builder |
-| `resolveWireOverlaps` | 850 | Re-orients parts to clear wires (fallback layouts only) |
-| `loadNetlistJson` | 886 | Entry point: strategy choice and orchestration |
+| `typeToKind` | 140 | Backend class name → `ComponentKind` |
+| `normPinName`, `findPinDef` | 407 | Pin-name matching (`-` = `−`) |
+| `bridgeSkippedComponentNets` | 230 | Merges nets across unsupported parts |
+| `CANVAS_MARGIN`, `TARGET_W`, `TARGET_H` | 279 | Target layout area |
+| `MIN_GRID_PER_PART` | 289 | Minimum part spacing |
+| `medianPartLengthPx` | 292 | Typical drawn part length |
+| `clusterTolerancePx` | 305 | Clustering tolerance |
+| `clusterValues` | 325 | 1-D clustering |
+| `buildPixelToGrid` | 350 | Scale, offset and snap transform |
+| `DIAGONAL_TOLERANCE_DEG` | 431 | Diagonal detection |
+| `computeOrientationFromPixels` | 433 | Rotation and mirroring from the pin direction |
+| `applyPixelOrientation` | 459 | Applies it to an instance |
+| `applyMultiPinOrientation` | 481 | Rotation and mirroring for transistors and op-amps |
+| `autoLayout` | 515 | Grid fallback |
+| `traceSeriesChain` | 547 | Loop order for the topology fallback |
+| `placeInLoop` | 610 | Rectangle placement for the topology fallback |
+| `buildWiresFromPinNetIds` | 663 | Primary wire builder |
+| `buildWiresFromSegments` | 710 | Ink-segment wire builder |
+| `buildWiresFromNets` | 787 | `nets[]` wire builder |
+| `resolveWireOverlaps` | 906 | Re-orients parts to clear wires (fallback layouts only) |
+| `loadNetlistJson` | 942 | Entry point: strategy choice and orchestration |
 | `snap`, `GRID_SIZE` | `utils/geometry.ts` | Rounding, and pixels per grid unit on screen |

@@ -628,8 +628,10 @@ DESIGNATOR_CLASSES = {
     "L": ("Inductor",),
     "D": ("Diode",),
     "V": ("Voltage", "Battery", "AC Source"),
+    "Q": ("Transistor",),
+    "U": ("Op-Amp",),
 }
-_DESIGNATOR_RE = re.compile(r"^([RCLDV])([0-9OoIl|]{1,3})$")
+_DESIGNATOR_RE = re.compile(r"^([RCLDVQU])([0-9OoIl|]{1,3})$")
 # Characters a value line may hold when re-read on its own.
 _VALUE_ALLOWLIST = "0123456789.kKmMuUnNpPvVfFhH"
 

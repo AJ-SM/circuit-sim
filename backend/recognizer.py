@@ -48,6 +48,12 @@ ROTATED_WEIGHT    = 0.5
 # Detections that are not circuit parts: written labels (the OCR reads those)
 # and wire junction dots (the wire topology finds those from the ink).
 IGNORED_CLASSES   = ("Text", "Junction")
+# A transistor or op-amp is one symbol among the circuit's parts. The 14-class
+# model sometimes boxes half the drawing (a hand-drawn circle source with + and
+# − marks, plus the wires around it) as an op-amp; a box over this share of
+# the image is dropped.
+LARGE_PART_CLASSES = ("Transistor", "Op-Amp")
+LARGE_PART_MAX_AREA = 0.2
 
 if str(MODEL_DIR) not in sys.path:
     sys.path.insert(0, str(MODEL_DIR))
@@ -173,6 +179,8 @@ def _predict(image: np.ndarray, angle: float, model_name: str | None = None,
         if cls in IGNORED_CLASSES:
             continue
         x1, y1, x2, y2 = box.xyxy[0].tolist()
+        if cls in LARGE_PART_CLASSES and                 (x2 - x1) * (y2 - y1) > LARGE_PART_MAX_AREA * src.shape[0] * src.shape[1]:
+            continue
         poly = np.array([[x1, y1], [x2, y1], [x2, y2], [x1, y2]], np.float32)
         if inv is not None:
             poly = (np.hstack([poly, np.ones((4, 1), np.float32)]) @ inv.T).astype(np.float32)
@@ -313,6 +321,7 @@ def _rename(components, conn_result, topology, names: dict[str, str]) -> None:
         for uid, net in conn_result.pin_to_net.items()
     }
     topology.polarity_method = {mapping.get(k, k): v for k, v in topology.polarity_method.items()}
+    topology.transistor_method = {mapping.get(k, k): v for k, v in topology.transistor_method.items()}
     # natural order: R2 before R10
     components.sort(key=lambda c: (re.sub(r"\d+", "", c.component_id),
                                    int(re.sub(r"\D", "", c.component_id) or 0)))
@@ -406,6 +415,10 @@ def recognize(image: np.ndarray, title: str = "drawn-circuit", boxes: list | Non
             ),
             **({"polarity": topology.polarity_method[comp.component_id]}
                if comp.component_id in topology.polarity_method else {}),
+            # transistors: "npn" / "pnp", and how the emitter was picked
+            **({"subtype": comp.subtype,
+                "emitter": topology.transistor_method.get(comp.component_id, "default")}
+               if getattr(comp, "subtype", "") else {}),
             "pins": [
                 {
                     "name": pin.name,

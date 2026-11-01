@@ -29,7 +29,7 @@
 import { v4 as uuid } from "uuid";
 import type { ComponentInstance, ComponentKind, Rotation, Wire, PinRef } from "../types/circuit";
 import { getDef } from "../domain/componentDefs";
-import { snap, orthogonalPath, pinDirection, resolvePinWorld } from "./geometry";
+import { snap, orthogonalPath, pinDirection, resolvePinWorld, transformLocal } from "./geometry";
 
 // ─── External JSON types ──────────────────────────────────────────────────────
 
@@ -45,6 +45,10 @@ export interface JsonComponent {
   net_pos: string;
   net_neg: string;
   spice_line: string;
+  /** Transistors: "npn" | "pnp". */
+  subtype?: string;
+  /** Three-pin parts: every pin's net, e.g. {"C": "N001", "E": "GND", "B": "N002"}. */
+  pins?: Record<string, string>;
 }
 
 export interface JsonWireSegment {
@@ -133,8 +137,17 @@ export interface LoadResult {
 
 // ─── Type mapping ─────────────────────────────────────────────────────────────
 
-function typeToKind(type: string): ComponentKind | null {
+function typeToKind(type: string, subtype?: string): ComponentKind | null {
   switch (type.toLowerCase().trim()) {
+    case "transistor":
+    case "bjt":         return subtype?.toLowerCase() === "pnp" ? "bjt_pnp" : "bjt_npn";
+    case "npn":
+    case "bjt_npn":     return "bjt_npn";
+    case "pnp":
+    case "bjt_pnp":     return "bjt_pnp";
+    case "op-amp":
+    case "op amp":
+    case "opamp":       return "opamp";
     case "resistor":    return "resistor";
     case "capacitor":   return "capacitor";
     case "inductor":    return "inductor";
@@ -155,7 +168,7 @@ function typeToKind(type: string): ComponentKind | null {
     case "ac":          return "vsource_ac";
     case "ground":
     case "gnd":         return "ground";
-    default:            return null; // transistors etc. not yet in canvas
+    default:            return null; // e.g. LED, lamp, switch: not in the canvas yet
   }
 }
 
@@ -195,7 +208,7 @@ function unionNets(json: JsonNetlist): Map<string, string> {
   }
 
   for (const jc of json.components) {
-    if (typeToKind(jc.type)) continue; // supported — draws its own symbol, no bridging needed
+    if (typeToKind(jc.type, jc.subtype)) continue; // supported — draws its own symbol, no bridging needed
     // "?" marks a net the backend couldn't resolve; never bridge those together.
     if (!jc.net_pos || !jc.net_neg || jc.net_pos === "?" || jc.net_neg === "?") continue;
     if (jc.net_pos === jc.net_neg) continue;
@@ -387,6 +400,19 @@ export function buildPixelToGrid(
   return { toGrid: rawToGrid, toGridClustered: clusteredToGrid, scale };
 }
 
+// ─── Pin names ────────────────────────────────────────────────────────────────
+
+/** Pin names compare case-insensitively, and the backend's ASCII "-" is the
+ *  op-amp's "−" pin. */
+function normPinName(name: string): string {
+  return name.toLowerCase().trim().replace(/−/g, "-");
+}
+
+function findPinDef(kind: ComponentKind, name: string) {
+  const n = normPinName(name);
+  return getDef(kind).pins.find((p) => normPinName(p.name) === n);
+}
+
 // ─── Orientation from detected pin pixels ─────────────────────────────────────
 
 /**
@@ -435,13 +461,53 @@ function applyPixelOrientation(
   detail: JsonComponentDetail
 ): void {
   const def = getDef(instance.kind);
+  if (def.pins.length > 2) {
+    applyMultiPinOrientation(instance, detail);
+    return;
+  }
   if (def.pins.length !== 2) return;
-  const p1 = detail.pins.find((p) => p.name.toLowerCase() === def.pins[0].name.toLowerCase());
-  const p2 = detail.pins.find((p) => p.name.toLowerCase() === def.pins[1].name.toLowerCase());
+  const p1 = detail.pins.find((p) => normPinName(p.name) === normPinName(def.pins[0].name));
+  const p2 = detail.pins.find((p) => normPinName(p.name) === normPinName(def.pins[1].name));
   if (!p1 || !p2) return;
   const { rotation, mirrored } = computeOrientationFromPixels(p1, p2);
   instance.rotation = rotation;
   instance.mirrored = mirrored;
+}
+
+/** Transistors and op-amps: of the four rotations, mirrored or not, pick
+ *  the one whose pins point the way the detected pins sit around the
+ *  part's centre in the drawing (each pin's direction from the centre,
+ *  compared by angle, so the symbol's size doesn't matter). */
+function applyMultiPinOrientation(
+  instance: ComponentInstance,
+  detail: JsonComponentDetail
+): void {
+  const def = getDef(instance.kind);
+  const cx = detail.bbox.cx;
+  const cy = detail.bbox.cy;
+  const pairs = def.pins
+    .map((pin) => ({ pin, seen: detail.pins.find((p) => normPinName(p.name) === normPinName(pin.name)) }))
+    .filter((m): m is { pin: typeof m.pin; seen: JsonPinDetail } => !!m.seen);
+  if (pairs.length < 2) return;
+  const unit = (x: number, y: number) => {
+    const n = Math.hypot(x, y) || 1;
+    return { x: x / n, y: y / n };
+  };
+  let best = { rotation: 0 as Rotation, mirrored: false, score: -Infinity };
+  for (const rotation of ALL_ROTATIONS) {
+    for (const mirrored of [false, true]) {
+      let score = 0;
+      for (const { pin, seen } of pairs) {
+        const t = transformLocal(pin.local, rotation, mirrored);
+        const a = unit(t.x, t.y);
+        const b = unit(seen.x - cx, seen.y - cy);
+        score += a.x * b.x + a.y * b.y;
+      }
+      if (score > best.score + 1e-9) best = { rotation, mirrored, score };
+    }
+  }
+  instance.rotation = best.rotation;
+  instance.mirrored = best.mirrored;
 }
 
 // ─── Fallback auto-layout (old format, no component_details) ─────────────────
@@ -603,13 +669,9 @@ function buildWiresFromPinNetIds(
   for (const detail of details) {
     const inst = refToInstance.get(detail.ref_des);
     if (!inst) continue;
-    const def = getDef(inst.kind);
-
     for (const pinDetail of detail.pins) {
       if (!pinDetail.net_id) continue;
-      const pinDef = def.pins.find(
-        (p) => p.name.toLowerCase() === pinDetail.name.toLowerCase()
-      );
+      const pinDef = findPinDef(inst.kind, pinDetail.name);
       if (!pinDef) continue;
       const ref: PinRef = { componentId: inst.id, pinId: pinDef.id };
       if (!netToPins.has(pinDetail.net_id)) netToPins.set(pinDetail.net_id, []);
@@ -669,11 +731,8 @@ function buildWiresFromSegments(
   for (const detail of details) {
     const inst = refToInstance.get(detail.ref_des);
     if (!inst) continue;
-    const def = getDef(inst.kind);
     for (const pinDetail of detail.pins) {
-      const pinDef = def.pins.find(
-        (p) => p.name.toLowerCase() === pinDetail.name.toLowerCase()
-      );
+      const pinDef = findPinDef(inst.kind, pinDetail.name);
       if (!pinDef) continue;
       const ptId = findOrAdd(pinDetail.x, pinDetail.y);
       if (!pinAtPoint.has(ptId))
@@ -749,10 +808,7 @@ function buildWiresFromNets(
       const pinName = pinStr.slice(dotIdx + 1);
       const inst = refToInstance.get(refDes);
       if (!inst) continue;
-      const def = getDef(inst.kind);
-      const pin = def.pins.find(
-        (p) => p.name.toLowerCase() === pinName.toLowerCase()
-      );
+      const pin = findPinDef(inst.kind, pinName);
       if (!pin) continue;
       refs.push({ componentId: inst.id, pinId: pin.id });
     }
@@ -891,7 +947,7 @@ export function loadNetlistJson(rawJson: JsonNetlist): LoadResult {
   const mapped: MappedComp[] = [];
 
   for (const jc of json.components) {
-    const kind = typeToKind(jc.type);
+    const kind = typeToKind(jc.type, jc.subtype);
     if (!kind) {
       skipped.push(jc.ref_des);
       continue;
