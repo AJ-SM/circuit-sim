@@ -43,12 +43,17 @@ ROTATED_ONLY_CONF = 0.5
 # and a rotated view's vote counts for less than the upright one's.
 ROTATED_CLASSES   = ("Resistor", "Inductor", "Capacitor", "Diode")
 ROTATED_WEIGHT    = 0.5
+# Detections that are not circuit parts: written labels (the OCR reads those)
+# and wire junction dots (the wire topology finds those from the ink).
+IGNORED_CLASSES   = ("Text", "Junction")
 
 if str(MODEL_DIR) not in sys.path:
     sys.path.insert(0, str(MODEL_DIR))
 
-# Loaded YOLO models, keyed by weights path (each loaded once on first use).
+# Loaded YOLO models, keyed by weights path (each loaded once on first use),
+# with the class-name map for each: the model's own label -> pipeline name.
 _models: dict[Path, object] = {}
+_class_names: dict[Path, dict[str, str]] = {}
 _model_lock = threading.Lock()
 
 
@@ -76,8 +81,24 @@ def _resolve_weights(model: str | None) -> Path:
     raise RecognitionError(f"Unknown model '{model}'.")
 
 
+def _load_class_names(weights: Path) -> dict[str, str]:
+    """Optional `<weights>.names.json` beside the weights, mapping the model's
+    own class labels to the names the pipeline uses ("Resistor", ...). Needed
+    for models trained with numbered classes, e.g. circuit_yolo11_best.pt."""
+    import json
+    path = weights.with_suffix(".names.json")
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise RecognitionError(f"Could not read class names from '{path.name}': {exc}")
+    return {str(k): str(v) for k, v in data.items()}
+
+
 def _get_model(model: str | None = None):
-    """Load the chosen YOLO weights once and reuse them across requests."""
+    """Load the chosen YOLO weights once and reuse them across requests.
+    Returns (model, class-name map)."""
     weights = _resolve_weights(model)
     with _model_lock:
         if weights not in _models:
@@ -87,8 +108,9 @@ def _get_model(model: str | None = None):
                     "Set CIRCUIT_MODEL_WEIGHTS or CIRCUIT_MODEL_DIR."
                 )
             from ultralytics import YOLO
+            _class_names[weights] = _load_class_names(weights)
             _models[weights] = YOLO(str(weights))
-        return _models[weights]
+        return _models[weights], _class_names[weights]
 
 
 def decode_image(data: bytes) -> np.ndarray:
@@ -124,17 +146,21 @@ def _rotate(image: np.ndarray, angle: float):
 def _predict(image: np.ndarray, angle: float,
              model_name: str | None = None) -> list[tuple[str, float, np.ndarray]]:
     """(class, conf, 4x2 corner polygon in original image coords) per box."""
-    model = _get_model(model_name)
+    model, class_names = _get_model(model_name)
     src, inv = (image, None) if angle == 0 else _rotate(image, angle)
     with _model_lock:
         preds = model.predict(source=src, conf=YOLO_CONF, iou=YOLO_IOU, verbose=False)
     out = []
     for box in preds[0].boxes:
+        label = str(model.names[int(box.cls.item())])
+        cls = class_names.get(label, label)
+        if cls in IGNORED_CLASSES:
+            continue
         x1, y1, x2, y2 = box.xyxy[0].tolist()
         poly = np.array([[x1, y1], [x2, y1], [x2, y2], [x1, y2]], np.float32)
         if inv is not None:
             poly = (np.hstack([poly, np.ones((4, 1), np.float32)]) @ inv.T).astype(np.float32)
-        out.append((model.names[int(box.cls.item())], float(box.conf.item()), poly))
+        out.append((cls, float(box.conf.item()), poly))
     return out
 
 

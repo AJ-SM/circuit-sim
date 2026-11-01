@@ -1,0 +1,13 @@
+{
+  "0": "Text",
+  "1": "LED",
+  "10": "Junction",
+  "2": "Lamp",
+  "3": "Transformer",
+  "4": "Capacitor",
+  "5": "Resistor",
+  "6": "Inductor",
+  "7": "Diode",
+  "8": "Switch",
+  "9": "Voltage"
+}
