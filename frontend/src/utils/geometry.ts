@@ -73,7 +73,7 @@ export function pinDirection(
   component: ComponentInstance,
   pin: PinDef
 ): { x: number; y: number } {
-  const t = transformLocal(pin.local, component.rotation, component.mirrored);
+  const t = transformLocal(pin.dir ?? pin.local, component.rotation, component.mirrored);
   return { x: Math.sign(t.x), y: Math.sign(t.y) };
 }
 

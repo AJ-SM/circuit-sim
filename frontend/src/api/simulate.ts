@@ -22,6 +22,13 @@ export interface BranchInfo {
   delta_v: number;
   current_a: number;
   direction: "a_to_b" | "b_to_a" | "none";
+  /** Every pin, in the part's pin order: its net, its voltage, and the
+   *  current flowing INTO the part at that pin. Two-pin parts give
+   *  [current_a, -current_a]; transistors and op-amps need these because
+   *  their pin currents differ. Absent from older backends. */
+  pin_nodes?: string[];
+  pin_voltages?: number[];
+  pin_currents?: number[];
 }
 
 export interface SimulationResult {

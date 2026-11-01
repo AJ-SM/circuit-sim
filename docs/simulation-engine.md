@@ -77,6 +77,15 @@ Who does what:
   | `diode` | anode | cathode |
   | `ground` | GND (single pin) | — |
 
+  Three-pin parts follow the same rule, with a third pin after the pair:
+
+  | Kind | Pin a (index 0) | Pin b (index 1) | Pin 2 | So ΔV / current mean |
+  |---|---|---|---|---|
+  | `bjt_npn`, `bjt_pnp` | C (collector) | E (emitter) | B (base) | Vce / Ic (into the collector) |
+  | `opamp` | `+` (non-inverting) | `−` (inverting) | out | V(+) − V(−) / current into `+` (≈ 0) |
+
+  Their pins carry an explicit `dir` (outward direction), so on an upright transistor the collector and emitter wires leave vertically rather than at 45°.
+
 - A **wire** connects exactly two pins (`Wire.from`, `Wire.to` in `types/circuit.ts`). It has no electrical properties of its own: no resistance, no length, no value.
 
 - A **net** (or node) is a set of pins that are connected by wires, directly or through a chain of wires. Every pin in a net has the same voltage.
@@ -136,6 +145,8 @@ Each element gets a unique, index-based name: `<prefix><index>_<ref>`, e.g. `V0_
 | `diode` | `D` | `D… a s<i> DMOD` with `.model DMOD D(IS=2.52n RS=0.568 N=1.752)` (a 1N4148-like model) |
 | `vsource_dc`, `battery`, `vsource_dep` | `V` | `V… a b DC <voltage>` |
 | `vsource_ac` | `V` | `V… a b DC 0 AC <amplitude> SIN(0 <amplitude> <frequency>)` |
+| `bjt_npn`, `bjt_pnp` | `Q` | `Q… c b e QM<i>` with `.model QM<i> NPN\|PNP(IS=1e-14 BF=<beta> BR=1 VAF=100)`: a generic small-signal transistor (2N3904/2N3906 class), one model per part so each can have its own β (default 100) |
+| `opamp` | `B` | `R<i>_in + − 10Meg` and `B… out 0 V=Vmid+Vhalf*tanh(gain*(v(+)-v(−))/Vhalf)` (see §3.4) |
 | `ground` | — | not emitted |
 
 ### 3.3 Sense sources: how part currents are measured
@@ -153,7 +164,24 @@ Voltage sources need no sense source: ngspice already reports `v0_v1#branch`, th
 
 `deck.branch` remembers, for each component index, which `#branch` vector holds its current.
 
-### 3.4 Control block
+**Three-pin parts** get a sense source on **every** pin, from the outer net to an internal node (`VS<i>_<k>  net  s<i>_<k>  0`). Each `vs<i>_<k>#branch` is the current flowing **into the part at pin k**. They are kept in `deck.pins`; `deck.branch` points at pin 0's, so `current_a` is the current into pin a (Ic for a transistor).
+
+### 3.4 The op-amp model
+
+An ideal op-amp with output limits, as one behavioural voltage source on the output:
+
+```
+Vout = Vmid + Vhalf · tanh( gain · (V(+) − V(−)) / Vhalf )
+Vmid = (vpos + vneg) / 2,  Vhalf = (vpos − vneg) / 2
+```
+
+- Near zero input it is linear with slope `gain` (open-loop gain, default 10⁵), so negative-feedback circuits settle at the textbook values (e.g. inverting gain −Rf/Rin, with the tiny finite-gain error).
+- With no feedback it saturates smoothly at the rails `vpos` / `vneg` (default ±15 V) instead of reaching 10⁵ × Vin. Single-supply rails (e.g. 0 and 5 V) work too.
+- Input resistance 10 MΩ between the inputs, zero output resistance.
+- The output is referenced to ground and its current comes from the **supply, which is not drawn**. So an op-amp's pin currents don't sum to zero: the difference returns through the ground net.
+- In AC mode ngspice linearises it at the DC operating point, so the AC gain is the closed-loop gain.
+
+### 3.5 Control block
 
 ```
 .control
@@ -200,7 +228,7 @@ DC values are stored as complex numbers with a zero imaginary part, so DC and AC
 
 ## 5. Step 4 — Per-component branch analysis
 
-`_compute_branch_analysis()` turns the raw vectors into one `BranchInfo` record per two-terminal part:
+`_compute_branch_analysis()` turns the raw vectors into one `BranchInfo` record per part:
 
 ```ts
 interface BranchInfo {
@@ -214,8 +242,14 @@ interface BranchInfo {
   delta_v: number;        // V(node_a) − V(node_b)
   current_a: number;      // current THROUGH the part, + = pin a → pin b
   direction: "a_to_b" | "b_to_a" | "none";
+  // every pin, in pin order:
+  pin_nodes: string[];    // its net
+  pin_voltages: number[]; // its voltage (same rules as voltage_a)
+  pin_currents: number[]; // current INTO the part at that pin
 }
 ```
+
+For two-pin parts `pin_currents` is `[current_a, −current_a]`. For transistors and op-amps the pin currents are read from the per-pin sense sources (§3.3) and are what the canvas uses: a transistor's three currents differ (Ie = −(Ic + Ib)), and an op-amp's output current comes from its undrawn supply. For those parts `current_a` is the current into pin a (Ic, or the op-amp's `+` input current).
 
 How each field is computed:
 
@@ -225,6 +259,7 @@ How each field is computed:
 | `delta_v` | `signed(V(a) − V(b))` | The difference is taken on the full phasors **before** they are turned into a single number, so in AC it is the correct amplitude of the voltage across the part. Below 1 mV → `0`. |
 | `current_a` | `signed(<branch>#branch)` | Read from the sense source (passive parts) or the source's own branch (voltage sources). Below 1 nA → `0`. Rounded to 12 decimals. |
 | `direction` | `a_to_b` if `current_a > 0`, `b_to_a` if `< 0`, `none` if snapped to 0 | |
+| `pin_currents` | `signed(vs<i>_<k>#branch)` per pin (three-pin parts) | Below 1 nA → `0`. |
 
 ### 5.1 `_signed()`: one number from a phasor
 
@@ -237,7 +272,7 @@ For DC, `z` is real, so `_signed(z)` is just `z`.
 
 ### 5.2 Traces
 
-`/simulate` also returns `traces`, a flat map such as `{"V(1)": [10], "I(R1)": [0.002]}`, with one value per vector. These come from the same numbers and are mainly a summary. The canvas uses `branch_analysis`.
+`/simulate` also returns `traces`, a flat map such as `{"V(1)": [10], "I(R1)": [0.002]}`, with one value per vector; three-pin parts give one current per pin, e.g. `I(Q1.C)`, `I(Q1.E)`, `I(Q1.B)`, `I(U1.OUT)`. These come from the same numbers and are mainly a summary. The canvas uses `branch_analysis`.
 
 ---
 
@@ -303,6 +338,7 @@ ngspice gives the current through each **component**, but not through each **wir
 |---|---|
 | Pin a (index 0) | `−current_a` (through-current a → b *enters* at a) |
 | Pin b (index 1) | `+current_a` (and *leaves* at b) |
+| Any pin, when `pin_currents` is present | `−pin_currents[i]` (used first; needed for transistors and op-amps) |
 
 Example: a resistor with `current_a = +2 mA` *takes* 2 mA from the wire at pin a (injection −2 mA) and *pushes* 2 mA into the wire at pin b (+2 mA). A source with `current_a = −2 mA` pushes +2 mA out of its `+` pin, as expected.
 
@@ -484,7 +520,9 @@ The full 10 V is dropped across R1 (2 V) and R2 (8 V). None of it is dropped alo
 - **Mixed DC + AC sources:** in AC mode the DC sources are dropped (no superposition of the DC bias with the AC response).
 - **AC node voltages are magnitudes**, so their sign and phase are lost on the node pills (§9).
 - **Floating or singular circuits** (a node with no DC path to ground, a loop of ideal voltage sources) make ngspice fail, and the user sees `ok: false` with ngspice's error lines.
-- Only two-terminal parts are supported. The deck builder skips parts with fewer than 2 nodes and uses only the first two nodes of any part.
+- **Transistors** are a generic BJT model (only β is editable); there are no MOSFETs.
+- **Op-amps** are ideal apart from gain and output limits: no supply pins, no bandwidth/slew rate, no input offset or bias current. Their output current returns through the ground net, so in a circuit with no ground symbol the wire currents of that net can't balance exactly.
+- **Image import** doesn't create transistors or op-amps yet: the recognition pipeline gives every part two terminals, so a detected transistor or op-amp is skipped (bridged) like other parts the canvas can't place, and the CircuitJS export leaves them out.
 
 ---
 
@@ -493,6 +531,7 @@ The full 10 V is dropped across R1 (2 V) and R2 (8 V). None of it is dropped alo
 Two scripts check the sign conventions end to end:
 
 - **`backend/check_solver_polarity.py`**: checks the backend's `branch_analysis` signs and directions on reference circuits.
+- **`backend/check_active_parts.py`**: transistors and op-amps against circuit theory (bias point, β, KCL inside the part and at every net, inverting / non-inverting gain, rail saturation, AC gain). Runs in-process, no server needed: `cd backend && python check_active_parts.py`.
 - **`frontend/scripts/check-current-direction.mjs`**: builds circuits the way the editor does (`buildNetlist`), calls the running backend, and passes the results through `computeWireCurrents` / `currentOutOfPin`. The expected result everywhere: conventional current leaves a source's `+`, runs high → low through each part, and returns to `−`.
 
 ```bash
@@ -515,6 +554,7 @@ The backend also prints the deck, the raw ngspice output and a branch-analysis t
 | `frontend/src/domain/componentDefs.ts` | `COMPONENT_DEFS`, `getDef` | Pin order (pin a / pin b) for every kind |
 | `frontend/src/api/simulate.ts` | `runSimulation`, `BranchInfo` | POST `/simulate`, response types |
 | `backend/main.py` | `_build_spice_deck` | Netlist → SPICE deck, sense sources |
+| `backend/main.py` | `_add_multi_pin`, `_MULTI_PIN` | Transistor / op-amp lines, per-pin sense sources |
 | `backend/main.py` | `_run_ngspice`, `_find_ngspice` | Runs ngspice in batch mode |
 | `backend/main.py` | `_parse_results` | ngspice text → `{vector: complex}` |
 | `backend/main.py` | `_signed` | Phasor → signed scalar |

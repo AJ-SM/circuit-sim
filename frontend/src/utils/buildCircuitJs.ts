@@ -237,7 +237,10 @@ function componentLine(
     case "pnp":
     case "bjt_pnp":
     case "nmos":
-    case "pmos":                        return null;   // not supported in text format
+    case "pmos":
+    case "transistor":
+    case "opamp":
+    case "op-amp":                      return null;   // not supported in text format
     default:                            return `r ${x1} ${y1} ${x2} ${y2} 0 ${val}`;
   }
 }

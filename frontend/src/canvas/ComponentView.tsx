@@ -32,6 +32,26 @@ interface Props {
 
 
 
+function fmtPinVolts(v: number): string {
+  const abs = Math.abs(v);
+  if (abs < 1e-3) return "0.00 V";
+  if (abs >= 1) return `${v.toFixed(2)} V`;
+  return `${(v * 1e3).toFixed(1)} mV`;
+}
+
+/** Current into the part at a pin: magnitude plus ↓in / ↑out. */
+function fmtPinAmps(a: number): string {
+  const abs = Math.abs(a);
+  if (abs === 0) return "0 A";
+  const mag =
+    abs >= 1 ? `${abs.toFixed(2)} A`
+    : abs >= 1e-3 ? `${(abs * 1e3).toFixed(2)} mA`
+    : abs >= 1e-6 ? `${(abs * 1e6).toFixed(1)} µA`
+    : abs >= 1e-9 ? `${(abs * 1e9).toFixed(1)} nA`
+    : `${abs.toExponential(1)} A`;
+  return `${mag} ${a > 0 ? "in" : "out"}`;
+}
+
 export function ComponentView({
   component,
   showLabels = true,
@@ -61,6 +81,9 @@ export function ComponentView({
   const valueLabel = useMemo(() => {
     const p = def.params[0];
     if (!p) return null;
+    // Unitless settings (a transistor's β, an op-amp's gain) would read as
+    // a bare number next to the part; they're shown in the Inspector only.
+    if (p.unit === "none") return null;
     return formatSIValue(component.params[p.key] ?? p.default, p.unit);
   }, [def, component.params]);
 
@@ -138,11 +161,14 @@ export function ComponentView({
         const rot = ((component.rotation % 360) + 360) % 360;
         const vertical = rot === 90 || rot === 270;
         const top = -def.size.h * GRID_SIZE * 0.5;
+        // Left of a vertical part, clear of its body: 14 px for the thin
+        // two-pin parts, more for wide ones (transistor, op-amp).
+        const side = def.size.h > 1 ? -(def.size.h * GRID_SIZE * 0.5 + 4) : -14;
         const ref = vertical
-          ? { x: -14, y: valueLabel ? -2 : 4, anchor: "end" as const }
+          ? { x: side, y: valueLabel ? -2 : 4, anchor: "end" as const }
           : { x: 0, y: top - (valueLabel ? 16 : 5), anchor: "middle" as const };
         const val = vertical
-          ? { x: -14, y: 12, anchor: "end" as const }
+          ? { x: side, y: 12, anchor: "end" as const }
           : { x: 0, y: top - 4, anchor: "middle" as const };
         return (
           <g pointerEvents="none">
@@ -160,8 +186,56 @@ export function ComponentView({
         );
       })()}
 
+      {/* ── multi-pin parts (transistor, op-amp): one row per pin ── */}
+      {showBranchBadge && branchInfo && def.pins.length > 2 && branchInfo.pin_voltages && (() => {
+        const volts = branchInfo.pin_voltages!;
+        const amps = branchInfo.pin_currents ?? [];
+        const rowH = 16;
+        const bw = 150;
+        const bh = 10 + rowH * def.pins.length;
+        const rot = ((component.rotation % 360) + 360) % 360;
+        const vertical = rot === 90 || rot === 270;
+        const bx = vertical ? def.size.w * GRID_SIZE * 0.5 + 16 : -bw / 2;
+        const by = vertical ? -bh / 2 : def.size.h * GRID_SIZE * 0.6 + 14;
+        return (
+          <g
+            className="branch-badge"
+            pointerEvents="auto"
+            onClick={(e) => {
+              e.stopPropagation();
+              onToggleBranchBadge?.();
+            }}
+            style={{ cursor: "pointer" }}
+          >
+            <title>Pin voltages and currents (into the part). Click to hide.</title>
+            <rect x={bx} y={by} width={bw} height={bh} rx={3} fill="#23272c" stroke="#454c55" strokeWidth={1} />
+            <rect x={bx} y={by} width={3} height={bh} rx={1} fill="var(--text-faint)" />
+            {def.pins.map((pin, i) => {
+              const y = by + 18 + i * rowH;
+              const ia = amps[i] ?? 0;
+              return (
+                <g key={pin.id}>
+                  <text x={bx + 10} y={y} fontSize={11} fontFamily="var(--font-label)" fontWeight={700}
+                    fill="var(--text-dim)">
+                    {pin.name}
+                  </text>
+                  <text x={bx + 34} y={y} fontSize={11} fontFamily="var(--font-label)" fontWeight={700}
+                    fill="var(--sim-voltage)">
+                    {fmtPinVolts(volts[i] ?? 0)}
+                  </text>
+                  <text x={bx + bw - 8} y={y} textAnchor="end" fontSize={11} fontFamily="var(--font-label)"
+                    fontWeight={700} fill={ia === 0 ? "#64748b" : "var(--sim-current)"}>
+                    {fmtPinAmps(ia)}
+                  </text>
+                </g>
+              );
+            })}
+          </g>
+        );
+      })()}
+
       {/* ── simulation analysis badge (toggled by clicking with the eye on) ── */}
-      {showBranchBadge && branchInfo && (() => {
+      {showBranchBadge && branchInfo && !(def.pins.length > 2 && branchInfo.pin_voltages) && (() => {
         const dv = branchInfo.delta_v;
         const ia = branchInfo.current_a;
         const dir = branchInfo.direction;

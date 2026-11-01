@@ -1,5 +1,7 @@
 import { useCircuitStore } from "../store/circuitStore";
 import type { BranchInfo } from "../api/simulate";
+import { COMPONENT_DEFS, getDef } from "../domain/componentDefs";
+import type { ComponentKind } from "../types/circuit";
 
 // ── Formatters ────────────────────────────────────────────────────────────────
 
@@ -37,6 +39,33 @@ function DirectionCell({ b }: { b: BranchInfo }) {
       <span style={{ color: "#94a3b8", fontSize: 10 }}>{from}</span>
       <span style={{ color: "var(--sim-current)", fontSize: 12 }}>→</span>
       <span style={{ color: "#94a3b8", fontSize: 10 }}>{to}</span>
+    </span>
+  );
+}
+
+/** Transistors and op-amps: every pin's voltage and current (into the
+ *  part), since one ΔV / current pair doesn't describe them. ΔV and
+ *  Current columns show pins 1-2: Vce / Ic, or the op-amp's input V(+)−V(−). */
+function PinDetails({ b }: { b: BranchInfo }) {
+  const kind = b.type as ComponentKind;
+  if (!(kind in COMPONENT_DEFS) || !b.pin_voltages) return null;
+  const pins = getDef(kind).pins;
+  if (pins.length <= 2) return null;
+  return (
+    <span style={{ display: "block", marginTop: 2, fontFamily: "var(--font-label)", fontSize: 9 }}>
+      {pins.map((pin, i) => {
+        const ia = b.pin_currents?.[i] ?? 0;
+        return (
+          <span key={pin.id} style={{ display: "block", whiteSpace: "nowrap" }}>
+            <span style={{ color: "#94a3b8" }}>{pin.name}</span>{" "}
+            <span style={{ color: "var(--sim-voltage)" }}>{fmtVolts(b.pin_voltages![i] ?? 0)}</span>{" "}
+            <span style={{ color: currentColor(ia) }}>
+              {fmtAmps(Math.abs(ia))}
+              {ia === 0 ? "" : ia > 0 ? " in" : " out"}
+            </span>
+          </span>
+        );
+      })}
     </span>
   );
 }
@@ -100,6 +129,7 @@ export function BranchAnalysisPanel() {
                     <span style={{ color: "#475569", fontSize: 9, display: "block" }}>
                       {b.type}
                     </span>
+                    <PinDetails b={b} />
                   </td>
                   <td className="val-v" style={{ fontSize: 11 }}>
                     {fmtVolts(b.delta_v)}

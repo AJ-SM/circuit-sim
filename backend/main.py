@@ -104,6 +104,14 @@ class BranchInfo(BaseModel):
     delta_v: float
     current_a: float
     direction: str
+    # Every pin, in the component's pin order: its net, its voltage and the
+    # current flowing INTO the part at that pin. For two-pin parts this is
+    # [current_a, -current_a]; transistors and op-amps need it because their
+    # pin currents differ (Ie = Ic + Ib; an op-amp's output current comes
+    # from its supply, which the drawing doesn't show).
+    pin_nodes: list[str] | None = None
+    pin_voltages: list[float] | None = None
+    pin_currents: list[float] | None = None
 
 class SimulationResult(BaseModel):
     ok: bool
@@ -120,9 +128,22 @@ _TYPE_TO_SPICE = {
     "battery":    "V",
     "vsource_dep": "V",
     "diode":      "D",
+    "bjt_npn":    "Q",
+    "bjt_pnp":    "Q",
+    "opamp":      "B",
     "ground":     None,
 }
 _VOLTAGE_SOURCES = {"vsource_dc", "vsource_ac", "battery", "vsource_dep"}
+
+# Parts with more than two pins: their pin names, in the frontend's pin
+# order (nodes[i] is pin i). The first two are the pair that node_a/node_b,
+# delta_v and current_a describe: collector-emitter (Vce, Ic) for a
+# transistor, the inputs (differential input voltage) for an op-amp.
+_MULTI_PIN = {
+    "bjt_npn": ("C", "E", "B"),
+    "bjt_pnp": ("C", "E", "B"),
+    "opamp":   ("INP", "INN", "OUT"),
+}
 
 class _Deck:
     """A SPICE deck plus the names needed to read each component's result.
@@ -131,20 +152,73 @@ class _Deck:
     parts that share a ref - the DC and AC source palettes both number from
     V1 - can't clash. Each passive part also gets a 0 V sense source in
     series, so ngspice reports the true current through it (capacitors and
-    inductors included) as `<sense>#branch`, positive from pin A to pin B."""
+    inductors included) as `<sense>#branch`, positive from pin A to pin B.
+    Transistors and op-amps get a sense source on every pin instead
+    (`pins`), each positive for current flowing into the part."""
     def __init__(self) -> None:
         self.text = ""
         # component index -> (branch vector name, is_voltage_source)
         self.branch: dict[int, tuple[str, bool]] = {}
+        # component index -> sense source per pin (multi-pin parts only)
+        self.pins: dict[int, list[str]] = {}
         self.nodes: list[str] = []
         self.ac_freq: float | None = None
 
     def vectors(self) -> list[str]:
-        return [f"v({n})" for n in self.nodes] + [f"{br}#branch" for br, _ in self.branch.values()]
+        names = [br for br, _ in self.branch.values()]
+        names += [s for senses in self.pins.values() for s in senses if s not in names]
+        return [f"v({n})" for n in self.nodes] + [f"{s}#branch" for s in names]
 
 
 def _spice_name(prefix: str, idx: int, ref: str) -> str:
     return f"{prefix}{idx}_{re.sub(r'[^A-Za-z0-9]', '', ref) or 'X'}"
+
+
+def _add_multi_pin(lines: list[str], models: list[str], deck: _Deck, idx: int,
+                   comp: NetlistComponent, prefix: str, node, nodes: set[str]) -> None:
+    """Emit a transistor or op-amp. Each pin connects through a 0 V sense
+    source (outer net -> inner node), so `<sense>#branch` is the current
+    flowing into the part at that pin."""
+    pin_names = _MULTI_PIN[comp.type]
+    outer = [node(n) for n in comp.nodes[:len(pin_names)]]
+    nodes.update(outer)
+    inner = [f"s{idx}_{k}" for k in range(len(pin_names))]
+    senses = [f"VS{idx}_{k}" for k in range(len(pin_names))]
+    for o, i, s in zip(outer, inner, senses):
+        lines.append(f"{s} {o} {i} 0")
+    name = _spice_name(prefix, idx, comp.ref)
+    p = comp.params
+
+    if comp.type in ("bjt_npn", "bjt_pnp"):
+        c, e, b = inner
+        model = f"QM{idx}"
+        beta = p.get("beta", 100) or 100
+        polarity = "NPN" if comp.type == "bjt_npn" else "PNP"
+        lines.append(f"{name} {c} {b} {e} {model}")
+        # A generic small-signal transistor (2N3904/2N3906 class): IS sets
+        # Vbe ~ 0.65 V at 1 mA, VAF a mild Early effect.
+        models.append(f".model {model} {polarity}(IS=1e-14 BF={beta:g} BR=1 VAF=100)")
+    else:  # opamp
+        inp, inn, out = inner
+        gain = p.get("gain", 1e5) or 1e5
+        vpos, vneg = p.get("vpos", 15), p.get("vneg", -15)
+        if vpos < vneg:
+            vpos, vneg = vneg, vpos
+        if vpos - vneg < 1e-3:
+            vpos, vneg = vpos + 0.5, vneg - 0.5
+        vmid, vhalf = (vpos + vneg) / 2, (vpos - vneg) / 2
+        # Ideal op-amp with output limits: linear with open-loop gain `gain`
+        # around zero input, saturating smoothly at the rails (so an
+        # open-loop comparator stops at the rail instead of 1e5 * Vin).
+        # The output is referenced to ground; its current comes from the
+        # supply, which is not drawn.
+        lines.append(f"R{idx}_in {inp} {inn} 10Meg")
+        lines.append(f"{name} {out} 0 V={vmid:g}+{vhalf:g}*tanh({gain:g}*(v({inp})-v({inn}))/{vhalf:g})")
+
+    # node_a/node_b of the branch analysis are pins 0 and 1; current_a is
+    # the current into pin 0.
+    deck.branch[idx] = (senses[0].lower(), False)
+    deck.pins[idx] = [s.lower() for s in senses]
 
 
 def _build_spice_deck(netlist: Netlist, ac_freq: float | None) -> _Deck:
@@ -165,9 +239,15 @@ def _build_spice_deck(netlist: Netlist, ac_freq: float | None) -> _Deck:
     lines: list[str] = ["* Auto-generated by circuit-backend"]
     nodes: set[str] = set()
     uses_diode = False
+    models: list[str] = []
     for idx, comp in enumerate(netlist.components):
         prefix = _TYPE_TO_SPICE.get(comp.type)
         if prefix is None or len(comp.nodes) < 2:
+            continue
+        if comp.type in _MULTI_PIN:
+            if len(comp.nodes) < len(_MULTI_PIN[comp.type]):
+                continue
+            _add_multi_pin(lines, models, deck, idx, comp, prefix, _node, nodes)
             continue
         a, b = _node(comp.nodes[0]), _node(comp.nodes[1])
         nodes.update((a, b))
@@ -198,6 +278,7 @@ def _build_spice_deck(netlist: Netlist, ac_freq: float | None) -> _Deck:
         deck.branch[idx] = (sense.lower(), False)
     if uses_diode:
         lines.append(".model DMOD D(IS=2.52n RS=0.568 N=1.752)")
+    lines.extend(models)
 
     deck.nodes = sorted(n for n in nodes if n != "0")
     vectors = deck.vectors()
@@ -347,7 +428,19 @@ def _compute_branch_analysis(netlist: Netlist, deck: _Deck, values: dict[str, co
             current, direction = 0.0, "none"
         else:
             direction = "a_to_b" if current > 0 else "b_to_a"
+        if idx in deck.pins:
+            pin_nodes = comp.nodes[:len(deck.pins[idx])]
+            pin_currents = []
+            for s in deck.pins[idx]:
+                ip = _signed(values.get(f"{s}#branch", 0j))
+                pin_currents.append(0.0 if abs(ip) < _CURRENT_SNAP else round(ip, 12))
+        else:
+            pin_nodes = comp.nodes[:2]
+            pin_currents = [round(current, 12), round(-current, 12) + 0.0]
         branches.append({
+            "pin_nodes": [n.lower() for n in pin_nodes],
+            "pin_voltages": [volts(phasor(n)) for n in pin_nodes],
+            "pin_currents": pin_currents,
             "component_id": comp.id,
             "ref": comp.ref,
             "type": comp.type,
@@ -399,7 +492,13 @@ async def simulate(req: SimulateRequest) -> Any:
     for n in deck.nodes:
         traces[f"V({n.upper()})"] = [_signed(values[f"v({n})"])]
     for idx, (br, _) in deck.branch.items():
-        traces[f"I({req.netlist.components[idx].ref.upper()})"] = [_signed(values[f"{br}#branch"])]
+        comp = req.netlist.components[idx]
+        if idx in deck.pins:
+            # One trace per pin, e.g. I(Q1.C), current into the part.
+            for pin, s in zip(_MULTI_PIN[comp.type], deck.pins[idx]):
+                traces[f"I({comp.ref.upper()}.{pin})"] = [_signed(values[f"{s}#branch"])]
+        else:
+            traces[f"I({comp.ref.upper()})"] = [_signed(values[f"{br}#branch"])]
     branch_analysis = _compute_branch_analysis(req.netlist, deck, values)
 
     message = None

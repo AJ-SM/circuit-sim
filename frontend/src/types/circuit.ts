@@ -11,6 +11,9 @@ export type ComponentKind =
   | "battery"
   | "vsource_dep"
   | "diode"
+  | "bjt_npn"
+  | "bjt_pnp"
+  | "opamp"
   | "ground";
 
 /** Degrees clockwise, in 45° steps. The diagonal ones place a part on a
@@ -26,6 +29,10 @@ export interface PinDef {
   /** local offset from component center, in grid units */
   local: { x: number; y: number };
   name: string; // human label, e.g. "A", "K", "+"
+  /** Direction the pin points out of the part, in the same local space.
+   *  Defaults to the sign of `local`; set it when that would be diagonal on
+   *  an upright part (a transistor's collector at (1,-1) leaves upwards). */
+  dir?: { x: number; y: number };
 }
 
 /** Static definition of a component kind: how it's drawn, its pins,

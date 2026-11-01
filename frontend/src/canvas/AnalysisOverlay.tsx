@@ -131,6 +131,10 @@ export function buildNodeLabels(
   for (const b of branchAnalysis) {
     nodeVoltage.set(b.node_a, b.voltage_a);
     nodeVoltage.set(b.node_b, b.voltage_b);
+    b.pin_nodes?.forEach((n, i) => {
+      const v = b.pin_voltages?.[i];
+      if (v !== undefined) nodeVoltage.set(n, v);
+    });
   }
   // "0" is always GND (strictly 0.0 V)
   nodeVoltage.set("0", 0);

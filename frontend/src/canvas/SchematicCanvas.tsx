@@ -274,6 +274,10 @@ export function SchematicCanvas() {
       for (const b of simResult.branch_analysis) {
         m.set(b.node_a, b.voltage_a);
         m.set(b.node_b, b.voltage_b);
+        b.pin_nodes?.forEach((n, i) => {
+          const v = b.pin_voltages?.[i];
+          if (v !== undefined) m.set(n, v);
+        });
       }
     }
     return m;
@@ -331,7 +335,8 @@ export function SchematicCanvas() {
       const c = components.find((x) => x.id === componentId);
       if (!b || !c || Math.abs(b.delta_v) < 1e-3) return undefined;
       const pins = getDef(c.kind).pins;
-      if (pins.length < 2) return undefined;
+      // +/− ends only make sense for two-pin parts.
+      if (pins.length !== 2) return undefined;
       const idx = pins.findIndex((p) => p.id === pinId);
       if (idx < 0) return undefined;
       // delta_v = V(pin 0) − V(pin 1)

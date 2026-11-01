@@ -23,6 +23,10 @@ export function currentOutOfPin(
 ): number {
   const pins = getDef(component.kind).pins;
   const idx = pins.findIndex((p) => p.id === pinId);
+  // Per-pin currents (into the part) when the backend sends them: needed
+  // for transistors and op-amps, whose pin currents differ.
+  const perPin = branch.pin_currents;
+  if (perPin && idx >= 0 && idx < perPin.length) return -perPin[idx];
   // Through-current a → b enters at pin a and leaves at pin b.
   if (idx === 0) return -branch.current_a;
   if (idx === 1) return branch.current_a;
