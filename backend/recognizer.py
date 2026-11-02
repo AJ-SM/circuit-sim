@@ -54,9 +54,11 @@ IGNORED_CLASSES   = ("Text", "Junction")
 # the image is dropped.
 LARGE_PART_CLASSES = ("Transistor", "Op-Amp")
 LARGE_PART_MAX_AREA = 0.2
-# Weights used instead of the default when the drawing has an op-amp and the
-# client didn't choose a model (see detect_boxes).
-OPAMP_WEIGHTS = os.environ.get("CIRCUIT_OPAMP_WEIGHTS", "circuit_yolo11_v4_best.pt")
+# Weights used instead of the default when the drawing has a transistor or an
+# op-amp and the client didn't choose a model (see detect_boxes), and the
+# confidence a transistor seen by them needs to make that switch.
+ACTIVE_PART_WEIGHTS = os.environ.get("CIRCUIT_ACTIVE_PART_WEIGHTS", "circuit_yolo11_v4_best.pt")
+ACTIVE_PART_MIN_CONF = 0.5
 
 if str(MODEL_DIR) not in sys.path:
     sys.path.insert(0, str(MODEL_DIR))
@@ -270,18 +272,58 @@ def detect_boxes(image: np.ndarray, rotations: bool = True, model: str | None = 
     """Component detection (see _yolo_boxes) plus op-amps found from their
     triangle shape, which most weights have no class for (opamp_detector.py).
 
-    When the drawing has an op-amp and the client left the model to the
-    backend, the op-amp-aware weights (OPAMP_WEIGHTS, trained on schematics
-    with op-amps) detect the parts around it: the default weights miss the
-    grounds there and read terminal circles as inductors. Other drawings
-    keep the default weights, which handle dark canvases better."""
+    When the drawing has an op-amp or a transistor and the client left the
+    model to the backend, the weights trained on those parts
+    (ACTIVE_PART_WEIGHTS) detect the whole drawing: the default weights have
+    no transistor class, miss the grounds around an op-amp, and read
+    terminal circles as inductors and box (IEC) resistors as inductors or
+    sources. Other drawings keep the default weights, which handle dark
+    canvases better. An op-amp is spotted by its shape, a transistor by one
+    upright pass of the active-part weights."""
     from drawn_topology import binarize
     from opamp_detector import add_opamps, find_opamp_triangles
 
     ink = binarize(image)
-    if model is None and find_opamp_triangles(ink) and (MODEL_DIR / OPAMP_WEIGHTS).exists():
-        model = OPAMP_WEIGHTS
-    return add_opamps(ink, _yolo_boxes(image, rotations, model))
+    if model is None and (MODEL_DIR / ACTIVE_PART_WEIGHTS).exists():
+        if find_opamp_triangles(ink) or _has_transistor(image):
+            model = ACTIVE_PART_WEIGHTS
+    boxes = add_opamps(ink, _yolo_boxes(image, rotations, model))
+    for b in boxes:
+        if b.cls_name == "Diode" and _is_box_resistor(ink, b):
+            b.cls_name = "Resistor"
+    return boxes
+
+
+def _is_box_resistor(ink: np.ndarray, box) -> bool:
+    """An IEC resistor (an empty rectangle on the lead) that the detector
+    called a diode: the symbol's ink encloses an elongated rectangle and no
+    triangle. A diode's triangle is either filled (no hole) or a triangular
+    hole, which fills only about half its bounding rectangle."""
+    x1, y1, x2, y2 = max(box.x1, 0), max(box.y1, 0), box.x2, box.y2
+    crop = ink[y1:y2, x1:x2]
+    if crop.size == 0:
+        return False
+    contours, hier = cv2.findContours(crop, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+    if hier is None:
+        return False
+    box_area = crop.shape[0] * crop.shape[1]
+    for cnt, h in zip(contours, hier[0]):
+        if h[3] < 0:                       # outer contour; holes have a parent
+            continue
+        area = cv2.contourArea(cnt)
+        (_, _), (rw, rh), _ = cv2.minAreaRect(cnt)
+        if area < 0.05 * box_area or rw * rh <= 0:
+            continue
+        if area / (rw * rh) >= 0.85 and max(rw, rh) >= 1.6 * min(rw, rh):
+            return True
+    return False
+
+
+def _has_transistor(image: np.ndarray) -> bool:
+    """One upright pass of the active-part weights sees a transistor."""
+    size = _get_model(ACTIVE_PART_WEIGHTS)[1]["imgsz"][0]
+    return any(cls == "Transistor" and conf >= ACTIVE_PART_MIN_CONF
+               for cls, conf, _ in _predict(image, 0, ACTIVE_PART_WEIGHTS, size))
 
 
 def box_to_json(b) -> dict:

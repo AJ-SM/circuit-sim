@@ -50,6 +50,16 @@ class _Contact:
     blob: int
 
 
+@dataclass
+class _Crossing:
+    """Two wires crossing without a junction dot (see _crossings)."""
+    x: int
+    y: int
+    cut: int                 # radius of the disc cut out of the wire mask
+    radius: int              # where the arms were sampled (outside the cut)
+    pairs: list              # [((x, y), (x, y)), ...] points on opposite arms
+
+
 def binarize(image: np.ndarray) -> np.ndarray:
     """Ink mask (uint8 0/1). Otsu suits clean canvas exports; for photos with
     uneven lighting, AND it with an adaptive threshold to reject shadows."""
@@ -224,10 +234,114 @@ class DrawnTopology:
         # only ever measured in the ring outside.
         for b in boxes:
             cv2.fillConvexPoly(wires, box_poly(b), 0)
+        # Two wires crossing without a junction dot are not connected: cut
+        # each crossing out, then rejoin each wire with its own far side.
+        crossings = self._crossings(wires)
+        for c in crossings:
+            cv2.circle(wires, (c.x, c.y), c.cut, 0, -1)
         _, labels = cv2.connectedComponents(wires, connectivity=8)
-        return self._bridge_gaps(labels, boxes)
+        labels = self._join_crossing_arms(labels, crossings)
+        return self._bridge_gaps(labels, boxes, crossings)
 
-    def _bridge_gaps(self, labels: np.ndarray, boxes: list[BoundingBox]) -> np.ndarray:
+    # ── wire crossings ────────────────────────────────────────────
+    def _crossings(self, wires: np.ndarray) -> list["_Crossing"]:
+        """Places where two wires cross without a junction dot: exactly four
+        wire arms leave the spot, in two straight (opposite) pairs, and the
+        ink there is no thicker than two crossing strokes. A dot (filled
+        blob) or any other number of arms is a real junction."""
+        skel = skeletonize(wires > 0).astype(np.uint8)
+        if not skel.any():
+            return []
+        nb = cv2.filter2D(skel, -1, np.ones((3, 3), np.float32)) - skel
+        branch = ((skel == 1) & (nb >= 3)).astype(np.uint8)
+        if not branch.any():
+            return []
+        w = self.stroke
+        # a crossing's skeleton often has two branch points close together
+        k = int(2 * w) | 1
+        n, _, _, cents = cv2.connectedComponentsWithStats(
+            cv2.dilate(branch, np.ones((k, k), np.uint8)), connectivity=8)
+        dist = cv2.distanceTransform(self.ink, cv2.DIST_L2, 5)
+        h, wd = wires.shape
+        cut = max(2, int(round(1.5 * w)))
+        radius = cut + max(3, int(round(1.5 * w)))
+        steps = max(72, int(2 * np.pi * radius))
+        angles = np.linspace(0, 2 * np.pi, steps, endpoint=False)
+        out: list[_Crossing] = []
+        for i in range(1, n):
+            cx, cy = int(round(cents[i][0])), int(round(cents[i][1]))
+            if not (radius <= cx < wd - radius and radius <= cy < h - radius):
+                continue
+            r = max(1, int(round(w)))
+            if dist[cy - r:cy + r + 1, cx - r:cx + r + 1].max() > 0.9 * w + 1.0:
+                continue                                  # junction dot
+            xs = np.round(cx + radius * np.cos(angles)).astype(int)
+            ys = np.round(cy + radius * np.sin(angles)).astype(int)
+            on = wires[ys, xs] > 0
+            if on.all() or not on.any():
+                continue
+            # runs of ink around the circle (rotated so none wraps)
+            start = int(np.argmin(on))
+            on, xs, ys, ang = (np.roll(a, -start) for a in (on, xs, ys, angles))
+            idx = np.flatnonzero(on)
+            runs = np.split(idx, np.flatnonzero(np.diff(idx) > 1) + 1)
+            if len(runs) != 4 or any(len(rn) > steps / 8 for rn in runs):
+                continue
+            arm = [(float(np.angle(np.exp(1j * ang[rn]).mean())),
+                    (int(xs[rn[len(rn) // 2]]), int(ys[rn[len(rn) // 2]]))) for rn in runs]
+            # All four arms must be one stroke through the centre: a part's
+            # unrecognised ink (a capacitor's lead, plate and the separate
+            # second plate) can also show four arms.
+            y0, x0 = cy - radius - 1, cx - radius - 1
+            win = wires[y0:cy + radius + 2, x0:cx + radius + 2].copy()
+            disc = np.zeros_like(win)
+            cv2.circle(disc, (radius + 1, radius + 1), radius + 1, 1, -1)
+            _, lab = cv2.connectedComponents(win & disc, connectivity=8)
+            centre = lab[radius - 1:radius + 4, radius - 1:radius + 4]
+            centre = centre[centre > 0]
+            if not centre.size:
+                continue
+            c_lab = int(np.bincount(centre).argmax())
+            if any(lab[py - y0, px - x0] != c_lab for _, (px, py) in arm):
+                continue
+            straight = all(
+                abs(abs(np.angle(np.exp(1j * (arm[j][0] - arm[j + 2][0])))) - np.pi) < np.radians(25)
+                for j in (0, 1))
+            if straight:
+                out.append(_Crossing(cx, cy, cut, radius,
+                                     [(arm[0][1], arm[2][1]), (arm[1][1], arm[3][1])]))
+        return out
+
+    @staticmethod
+    def _join_crossing_arms(labels: np.ndarray, crossings: list["_Crossing"]) -> np.ndarray:
+        """Rejoin each wire across its cut crossing: union the labels of
+        opposite arms."""
+        if not crossings:
+            return labels
+        n = int(labels.max())
+        parent = list(range(n + 1))
+
+        def find(a: int) -> int:
+            while parent[a] != a:
+                parent[a] = parent[parent[a]]
+                a = parent[a]
+            return a
+
+        def label_near(x: int, y: int) -> int:
+            win = labels[max(y - 2, 0):y + 3, max(x - 2, 0):x + 3]
+            vals = win[win > 0]
+            return int(np.bincount(vals).argmax()) if vals.size else 0
+
+        for c in crossings:
+            for p, q in c.pairs:
+                a, b = label_near(*p), label_near(*q)
+                if a and b:
+                    parent[find(a)] = find(b)
+        lut = np.array([find(i) for i in range(n + 1)], dtype=labels.dtype)
+        return lut[labels]
+
+    def _bridge_gaps(self, labels: np.ndarray, boxes: list[BoundingBox],
+                     crossings: list["_Crossing"] = ()) -> np.ndarray:
         """Hand-drawn wires often stop just short of each other at corners
         and T-junctions. Join a blob to another when one of its free stroke
         ends (skeleton endpoint) lies within `bridge` px of the other blob.
@@ -245,7 +359,11 @@ class DrawnTopology:
         for b in boxes:
             cv2.fillConvexPoly(near_box, box_poly(b), 1)
         r = self.ring * 2
-        near_box = cv2.dilate(near_box, np.ones((2 * r + 1, 2 * r + 1), np.uint8)).astype(bool)
+        near_box = cv2.dilate(near_box, np.ones((2 * r + 1, 2 * r + 1), np.uint8))
+        # The ends left by cutting a crossing are not gaps to close.
+        for c in crossings:
+            cv2.circle(near_box, (c.x, c.y), c.radius + 2, 1, -1)
+        near_box = near_box.astype(bool)
 
         parent = list(range(n + 1))
 
