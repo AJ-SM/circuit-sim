@@ -1,4 +1,4 @@
-import { GRID_SIZE, orthogonalPath, routedPath } from "../utils/geometry";
+import { GRID_SIZE, orthogonalPath, routedPath, waypointPath } from "../utils/geometry";
 import type { WireRoute } from "../types/circuit";
 
 export type VoltageEnd = "into" | "out";
@@ -64,6 +64,8 @@ interface Props {
   dirs?: ({ x: number; y: number } | undefined)[];
   selected: boolean;
   route?: WireRoute;
+  /** Stored interior points (grid units), e.g. traced from a drawing. */
+  waypoints?: { x: number; y: number }[];
   onPointerDown: (e: React.PointerEvent, dragAxis?: "x" | "y") => void;
   currentAmperes?: number;
   currentDirection?: "a_to_b" | "b_to_a" | "none";
@@ -107,7 +109,7 @@ function flowSpeed(amps: number): string {
 }
 
 export function WireView({
-  points, dirs, selected, route, onPointerDown,
+  points, dirs, selected, route, waypoints, onPointerDown,
   currentAmperes, currentDirection, avgVoltage,
   showFlow = true, labelMode = "off", voltageArrows,
 }: Props) {
@@ -115,7 +117,9 @@ export function WireView({
   const [a, b] = points;
   const grid = route
     ? routedPath(a, b, dirs?.[0], dirs?.[1], route)
-    : orthogonalPath(a, b, dirs?.[0], dirs?.[1]);
+    : waypoints
+      ? waypointPath(a, b, waypoints, dirs?.[0], dirs?.[1])
+      : orthogonalPath(a, b, dirs?.[0], dirs?.[1]);
   const routed = grid.map((p) => ({ x: p.x * GRID_SIZE, y: p.y * GRID_SIZE }));
   const d = routed.map((p, i) => `${i === 0 ? "M" : "L"} ${p.x} ${p.y}`).join(" ");
 

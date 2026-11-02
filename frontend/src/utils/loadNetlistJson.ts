@@ -107,6 +107,15 @@ export interface JsonNetlist {
   nets?: JsonNet[];
   components: JsonComponent[];
   component_details?: JsonComponentDetail[];
+  /** The drawn route of each wire: pin to pin, in image pixels. */
+  wire_paths?: JsonWirePath[];
+}
+
+export interface JsonWirePath {
+  net: string;
+  from: { ref: string; pin: string };
+  to: { ref: string; pin: string };
+  points: [number, number][];
 }
 
 // ─── Load result ──────────────────────────────────────────────────────────────
@@ -700,6 +709,92 @@ function buildWiresFromPinNetIds(
   return wires;
 }
 
+// ─── Wire building: drawn paths ───────────────────────────────────────────────
+
+/**
+ * Wires as drawn: one wire per traced pin-to-pin path, its interior corners
+ * mapped onto the grid as waypoints (the ends follow the pins, see
+ * waypointPath). Pins of a net that no traced path joins (e.g. a wire the
+ * tracer couldn't follow) are still connected with auto-routed wires, so the
+ * circuit's connectivity is exactly the pin net_ids'. Separate ground
+ * symbols don't need joining: each one is the reference node already.
+ */
+function buildWiresFromPaths(
+  paths: JsonWirePath[],
+  details: JsonComponentDetail[],
+  refToInstance: Map<string, ComponentInstance>,
+  p2g: PixelToGrid
+): Wire[] {
+  const pinRef = (ref: string, pin: string): PinRef | null => {
+    const inst = refToInstance.get(ref);
+    const def = inst && findPinDef(inst.kind, pin);
+    return inst && def ? { componentId: inst.id, pinId: def.id } : null;
+  };
+  const key = (r: PinRef) => `${r.componentId}:${r.pinId}`;
+  const parent = new Map<string, string>();
+  const find = (k: string): string => {
+    if (!parent.has(k)) parent.set(k, k);
+    let r = k;
+    while (parent.get(r) !== r) r = parent.get(r)!;
+    parent.set(k, r);
+    return r;
+  };
+
+  const wires: Wire[] = [];
+  for (const wp of paths) {
+    const from = pinRef(wp.from.ref, wp.from.pin);
+    const to = pinRef(wp.to.ref, wp.to.pin);
+    if (!from || !to) continue;
+    const grid = wp.points.map(([x, y]) => p2g.toGridClustered(x, y));
+    // A hand-drawn wire leans a little: a run that is nearly vertical or
+    // horizontal on the grid is straightened (its far end moves onto the
+    // run's line), so the wire doesn't slant by a grid unit.
+    for (let i = 1; i < grid.length; i++) {
+      const p = grid[i - 1];
+      const q = grid[i];
+      const dx = Math.abs(q.x - p.x);
+      const dy = Math.abs(q.y - p.y);
+      if (dx > 0 && dx <= 1 && dy >= 2) grid[i] = { x: p.x, y: q.y };
+      else if (dy > 0 && dy <= 1 && dx >= 2) grid[i] = { x: q.x, y: p.y };
+    }
+    const waypoints = grid
+      .slice(1, -1)
+      .filter((p, i, a) => i === 0 || p.x !== a[i - 1].x || p.y !== a[i - 1].y);
+    wires.push({ id: uuid(), from, to, waypoints });
+    parent.set(find(key(from)), find(key(to)));
+  }
+
+  // Keep every net connected even where no drawn path was traced.
+  const byNet = new Map<string, { ref: PinRef; ground: boolean }[]>();
+  for (const d of details) {
+    const inst = refToInstance.get(d.ref_des);
+    for (const p of d.pins) {
+      const ref = p.net_id ? pinRef(d.ref_des, p.name) : null;
+      if (!ref || !inst) continue;
+      if (!byNet.has(p.net_id!)) byNet.set(p.net_id!, []);
+      byNet.get(p.net_id!)!.push({ ref, ground: inst.kind === "ground" });
+    }
+  }
+  for (const pins of byNet.values()) {
+    const groups = new Map<string, { ref: PinRef; ground: boolean }[]>();
+    for (const p of pins) {
+      const root = find(key(p.ref));
+      if (!groups.has(root)) groups.set(root, []);
+      groups.get(root)!.push(p);
+    }
+    if (groups.size < 2) continue;
+    const list = [...groups.values()];
+    const grounded = list.filter((g) => g.some((p) => p.ground));
+    const anchor = (grounded[0] ?? list[0])[0].ref;
+    for (const g of list) {
+      if (g.some((p) => p.ground) || find(key(g[0].ref)) === find(key(anchor))) continue;
+      wires.push({ id: uuid(), from: anchor, to: g[0].ref });
+      parent.set(find(key(g[0].ref)), find(key(anchor)));
+    }
+  }
+  return wires;
+}
+
 // ─── Wire building: secondary — segment union-find (pixel proximity) ──────────
 
 /**
@@ -1030,6 +1125,14 @@ export function loadNetlistJson(rawJson: JsonNetlist): LoadResult {
         allPinYs.push(pin.y);
       }
     }
+    // Drawn wire corners cluster with the parts, so a wire along a rail
+    // lands on the same grid line as the pins on it.
+    for (const wp of json.wire_paths ?? []) {
+      for (const [x, y] of wp.points) {
+        allPinXs.push(x);
+        allPinYs.push(y);
+      }
+    }
     p2g = buildPixelToGrid(details, { xs: allPinXs, ys: allPinYs });
     mapped.forEach((m, idx) => {
       const detail = detailMap.get(m.jsonComp.ref_des);
@@ -1061,7 +1164,9 @@ export function loadNetlistJson(rawJson: JsonNetlist): LoadResult {
   const hasPinNetIds = hasDetails &&
     details.some((d) => d.pins.some((p) => !!p.net_id));
 
-  if (hasPinNetIds) {
+  if (p2g && (json.wire_paths?.length ?? 0) > 0) {
+    wires = buildWiresFromPaths(json.wire_paths!, details, refToInstance, p2g);
+  } else if (hasPinNetIds) {
     wires = buildWiresFromPinNetIds(details, refToInstance);
   }
 

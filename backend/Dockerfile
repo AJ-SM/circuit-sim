@@ -21,7 +21,7 @@ COPY requirements.txt ./
 RUN python -m pip install --upgrade pip \
     && python -m pip install -r requirements.txt
 
-COPY main.py jobs.py recognizer.py drawn_topology.py value_reader.py opamp_detector.py ./
+COPY main.py jobs.py recognizer.py drawn_topology.py value_reader.py opamp_detector.py placement_render.py ./
 COPY model/ ./model/
 
 USER app

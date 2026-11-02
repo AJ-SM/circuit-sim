@@ -39,6 +39,8 @@ SOURCE_CLASSES = ("Battery", "Voltage", "AC Source")
 # Three-terminal parts. Their pins are found from the wire contacts and the
 # symbol's shape (see _transistor_pins / _opamp_pins).
 TRANSISTOR = "Transistor"
+# Classes a drawn battery gets mistaken for (see _looks_like_battery).
+BATTERY_LOOKALIKES = ("Capacitor", "Resistor", "Voltage")
 OPAMP = "Op-Amp"
 
 
@@ -241,6 +243,7 @@ class DrawnTopology:
             cv2.circle(wires, (c.x, c.y), c.cut, 0, -1)
         _, labels = cv2.connectedComponents(wires, connectivity=8)
         labels = self._join_crossing_arms(labels, crossings)
+        self._crossings_used = crossings
         return self._bridge_gaps(labels, boxes, crossings)
 
     # ── wire crossings ────────────────────────────────────────────
@@ -347,6 +350,7 @@ class DrawnTopology:
         ends (skeleton endpoint) lies within `bridge` px of the other blob.
         Ends that sit at a component box are terminals, not gaps, and are
         skipped so a part is never shorted across its own leads."""
+        self._bridges_used = []
         n = int(labels.max())
         if n < 2:
             return labels
@@ -374,6 +378,7 @@ class DrawnTopology:
             return a
 
         R = self.bridge
+        self._bridges_used = []
         for y, x in zip(ys, xs):
             if near_box[y, x]:
                 continue
@@ -388,6 +393,7 @@ class DrawnTopology:
             k = int(d2.argmin())
             if d2[k] <= R * R:
                 parent[find(int(win[oy[k], ox[k]]))] = find(int(own))
+                self._bridges_used.append(((int(x), int(y)), (int(ox[k] + x1), int(oy[k] + y1))))
 
         lut = np.array([find(i) for i in range(n + 1)], dtype=labels.dtype)
         return lut[labels]
@@ -455,14 +461,23 @@ class DrawnTopology:
                 components.append(comp)
                 transistors.append((comp, blobs))
                 continue
+            if b.cls_name == "Ground" and self._leads_both_sides(b, contacts[id(b)]):
+                # A ground has one lead; plates with wires on two opposite
+                # sides are a battery (detectors confuse the two).
+                b.cls_name = "Battery"
             if b.cls_name == OPAMP:
                 pins, blobs, sign_method = self._opamp_pins(b, contacts[id(b)])
             else:
                 pins, blobs = self._make_pins(b, contacts[id(b)])
-            if b.cls_name == "Capacitor" and self._looks_like_battery(b, pins):
-                # The detector often calls a battery a capacitor.
+            if b.cls_name in BATTERY_LOOKALIKES and len(pins) == 2 and self._looks_like_battery(b, pins):
+                # Detectors often call a battery a capacitor, and in
+                # hand-drawn photos a resistor or a DC source.
                 b.cls_name = "Battery"
                 pins, blobs = self._make_pins(b, contacts[id(b)])
+            if b.cls_name == "Voltage" and self._has_sine(b):
+                # A circle source with a "~" drawn in it is AC; detectors
+                # trained mostly on DC circles often call it a DC source.
+                b.cls_name = "AC Source"
             prefix = REFDES_PREFIX.get(b.cls_name, "X")
             counters[prefix] = counters.get(prefix, 0) + 1
             ref = f"{prefix}{counters[prefix]}"
@@ -496,7 +511,107 @@ class DrawnTopology:
             for p, blob in zip(comp.pins, blobs):
                 pin_blob[f"{comp.component_id}.{p.name}"] = blob
 
+        # for wire_paths(): the final wire blobs and each pin's blob, keyed by
+        # the component object (designators may be renamed after build)
+        self._labels = labels
+        self._pin_blob = {(id(c), p.name): pin_blob.get(f"{c.component_id}.{p.name}")
+                          for c in components for p in c.pins}
         return components, self._nets(components, pin_blob), dropped
+
+    # ── drawn wire geometry ───────────────────────────────────────
+    def wire_paths(self, components: list[ComponentTerminal]) -> list[dict]:
+        """The drawn route of every wire, for laying the circuit out as
+        drawn. Within each wire blob (one net) the pins are joined by a
+        minimum spanning tree of their distances along the drawn strokes;
+        each tree edge is the stroke path between the two pins (through cut
+        crossings and bridged gaps as straight jumps), simplified to a few
+        straight segments. Returns [{"from": (comp, pin), "to": (comp, pin),
+        "points": [(x, y), ...]}], points in image pixels from pin to pin."""
+        labels = getattr(self, "_labels", None)
+        if labels is None:
+            return []
+        from scipy.sparse import coo_matrix
+        from scipy.sparse.csgraph import dijkstra
+        from scipy.spatial import cKDTree
+
+        skel = skeletonize(labels > 0)
+        ys, xs = np.nonzero(skel)
+        if ys.size < 2:
+            return []
+        n = ys.size
+        index = -np.ones(labels.shape, np.int64)
+        index[ys, xs] = np.arange(n)
+        rows, cols, wts = [], [], []
+        h, w = labels.shape
+        for dy, dx in ((0, 1), (1, 0), (1, 1), (1, -1)):
+            y2, x2 = ys + dy, xs + dx
+            ok = (y2 < h) & (x2 >= 0) & (x2 < w)
+            j = np.full(n, -1, np.int64)
+            j[ok] = index[y2[ok], x2[ok]]
+            m = j >= 0
+            rows.append(np.flatnonzero(m)); cols.append(j[m])
+            wts.append(np.full(int(m.sum()), np.hypot(dy, dx)))
+        tree = cKDTree(np.column_stack([xs, ys]))
+        jumps = [pq for c in getattr(self, "_crossings_used", []) for pq in c.pairs]
+        jumps += list(getattr(self, "_bridges_used", []))
+        for p, q in jumps:
+            (_, a), (_, b) = tree.query(p), tree.query(q)
+            rows.append(np.array([a])); cols.append(np.array([b]))
+            wts.append(np.array([max(1.0, float(np.hypot(xs[a] - xs[b], ys[a] - ys[b])))]))
+        r, c, wt = np.concatenate(rows), np.concatenate(cols), np.concatenate(wts)
+        graph = coo_matrix((np.concatenate([wt, wt]), (np.concatenate([r, c]), np.concatenate([c, r]))),
+                           shape=(n, n)).tocsr()
+
+        # each pin attaches to the nearest skeleton pixel of its own blob
+        node_label = labels[ys, xs]
+        blob_trees: dict[int, tuple] = {}
+        pins_by_blob: dict[int, list] = {}
+        for comp in components:
+            for p in comp.pins:
+                blob = self._pin_blob.get((id(comp), p.name))
+                if not blob:
+                    continue
+                if blob not in blob_trees:
+                    sel = np.flatnonzero(node_label == blob)
+                    blob_trees[blob] = (cKDTree(np.column_stack([xs[sel], ys[sel]])), sel) if sel.size else None
+                if blob_trees[blob] is None:
+                    continue
+                t, sel = blob_trees[blob]
+                node = int(sel[t.query((p.x, p.y))[1]])
+                pins_by_blob.setdefault(blob, []).append((comp, p, node))
+
+        eps = max(2.0, self.stroke)
+        out: list[dict] = []
+        for pins in pins_by_blob.values():
+            if len(pins) < 2:
+                continue
+            nodes = [node for _, _, node in pins]
+            dist, pred = dijkstra(graph, indices=nodes, return_predecessors=True)
+            d = dist[:, nodes]
+            # Prim's MST over the pins
+            k = len(pins)
+            in_tree, edges = {0}, []
+            while len(in_tree) < k:
+                best = min(((d[i, j], i, j) for i in in_tree for j in range(k) if j not in in_tree),
+                           default=(np.inf, -1, -1))
+                if not np.isfinite(best[0]):
+                    break                       # rest unreachable along the ink
+                in_tree.add(best[2])
+                edges.append((best[1], best[2]))
+            for i, j in edges:
+                chain, cur = [], nodes[j]
+                while cur >= 0 and cur != nodes[i]:
+                    chain.append(cur)
+                    cur = pred[i, cur]
+                chain.append(nodes[i])
+                chain.reverse()
+                (ci, pi, _), (cj, pj, _) = pins[i], pins[j]
+                pts = np.array([(pi.x, pi.y)] + [(xs[q], ys[q]) for q in chain] + [(pj.x, pj.y)],
+                               np.float32).reshape(-1, 1, 2)
+                simple = cv2.approxPolyDP(pts, eps, False).reshape(-1, 2)
+                out.append({"from": (ci, pi.name), "to": (cj, pj.name),
+                            "points": [(int(round(x)), int(round(y))) for x, y in simple]})
+        return out
 
     @staticmethod
     def _edge_point(poly: np.ndarray, x: float, y: float) -> tuple[int, int]:
@@ -821,6 +936,11 @@ class DrawnTopology:
         pos, neg = (pins[0], pins[1]) if pins[0].name == "+" else (pins[1], pins[0])
         plus_at = self._plus_from_marks(box, pos, neg)
         method = "marks"
+        if plus_at is None and box.cls_name == "Battery" and abs(neg.x - pos.x) >= abs(neg.y - pos.y):
+            # a plate battery's + / − are written beside it, not inside
+            # (only read for a horizontal battery: a vertical one's plates
+            # are flat bars that pass for "−" signs)
+            plus_at = self._plus_from_marks(box, pos, neg, around=True)
         if plus_at is None:
             plus_at = self._plus_from_plates(box, pos, neg)
             method = "plates"
@@ -868,10 +988,21 @@ class DrawnTopology:
         dx, dy = bx - ax, by - ay
         return ((x - ax) * dx + (y - ay) * dy) / max(dx * dx + dy * dy, 1)
 
-    def _plus_from_marks(self, box: BoundingBox, pos: Pin, neg: Pin) -> Pin | None:
+    def _plus_from_marks(self, box: BoundingBox, pos: Pin, neg: Pin,
+                         around: bool = False) -> Pin | None:
         """Look for a drawn "+" / "−" inside the symbol (circle-style sources).
         Marks are small blobs not touching the box edge (so not the circle
-        ring or the leads); a squarish, sparse blob is "+", a flat bar is "−"."""
+        ring or the leads); a squarish, sparse blob is "+", a flat bar is "−".
+        With `around` (used for horizontal plate batteries, whose signs are
+        written beside the plates), the search covers the area around the
+        symbol too; there a lone mark counts only when it sits clearly at one
+        end, since a mark nearer the middle may be a letter of the label."""
+        if around:
+            h, w = self.ink.shape
+            g = int(0.5 * max(box.x2 - box.x1, box.y2 - box.y1))
+            box = BoundingBox(x1=max(box.x1 - g, 0), y1=max(box.y1 - g, 0),
+                              x2=min(box.x2 + g, w), y2=min(box.y2 + g, h),
+                              cls_name=box.cls_name, conf=box.conf)
         plus_t, minus_t = [], []
         for sign, mx, my in self._sign_marks(box):
             t = self._along(box, pos, neg, mx, my)
@@ -882,7 +1013,50 @@ class DrawnTopology:
         votes = [t < 0.5 for t in plus_t] + [t >= 0.5 for t in minus_t]
         if not votes or (any(votes) and not all(votes)):
             return None                       # nothing found, or contradictory
+        if around and not (plus_t and minus_t) and                 any(abs(t - 0.5) < 0.35 for t in plus_t + minus_t):
+            return None                       # a lone mark not at an end may be label text
         return pos if votes[0] else neg
+
+    def _has_sine(self, box: BoundingBox) -> bool:
+        """A wave drawn inside the symbol and no + / − marks: a stroke not
+        touching the box edge that is wide (≥ 30 % of the symbol), flat and
+        sparse in its bounding box — a "~", where a "−" is a solid bar."""
+        if self._sign_marks(box):
+            return False
+        crop = self._crop(box)
+        h, w = crop.shape
+        size = max(h, w)
+        if size < 16:
+            return False
+        k = max(3, size // 40) | 1
+        n, lab, stats, _ = cv2.connectedComponentsWithStats(
+            cv2.dilate(crop, np.ones((k, k), np.uint8)), connectivity=8)
+        for i in range(1, n):
+            x, y, bw, bh, _ = stats[i]
+            if x <= 1 or y <= 1 or x + bw >= w - 1 or y + bh >= h - 1:
+                continue                                  # ring or lead
+            if bw < 0.3 * size or bw > 0.85 * size or bw < 1.3 * bh:
+                continue
+            fill = np.count_nonzero(crop[lab == i]) / float(bw * bh)
+            if fill < 0.5 and bh >= 2 * self.stroke:
+                return True
+        return False
+
+    @staticmethod
+    def _leads_both_sides(box: BoundingBox, contacts: list[_Contact]) -> bool:
+        """Wires (of different nets) enter the box from two opposite sides."""
+        w, h = max(box.x2 - box.x1, 1), max(box.y2 - box.y1, 1)
+        for i, a in enumerate(contacts):
+            for b in contacts[i + 1:]:
+                if a.blob == b.blob:
+                    continue
+                lo, hi = sorted((a, b), key=lambda c: c.x)
+                if lo.x <= box.x1 + 0.25 * w and hi.x >= box.x2 - 0.25 * w:
+                    return True
+                lo, hi = sorted((a, b), key=lambda c: c.y)
+                if lo.y <= box.y1 + 0.25 * h and hi.y >= box.y2 - 0.25 * h:
+                    return True
+        return False
 
     def _looks_like_battery(self, box: BoundingBox, pins: list[Pin]) -> bool:
         """Plates across the lead axis, measured as the longest unbroken
@@ -900,11 +1074,21 @@ class DrawnTopology:
             idx = np.flatnonzero(src[:, i])
             if idx.size:
                 longest[i] = max(len(r) for r in np.split(idx, np.flatnonzero(np.diff(idx) > 1) + 1))
+        # A plate is a run at least 35 % of the box across the leads, or —
+        # in a loose box (signs and margin around a hand-drawn battery) —
+        # 35 % of the tallest plate, which must itself stand well clear of
+        # the lead's stroke width.
+        tallest = float(longest.max())
+        if tallest < 3 * self.stroke:
+            return False
+        plate_min = min(0.35 * across, 0.35 * tallest)
         plates, start = [], None
-        for i, v in enumerate(np.append(longest >= 0.35 * across, False)):
+        for i, v in enumerate(np.append(longest >= plate_min, False)):
             if v and start is None:
                 start = i
             elif not v and start is not None:
+                if i - start > 2.5 * self.stroke + 2:
+                    return False      # a slanted stroke (zigzag), not a straight plate
                 plates.append(float(longest[start:i].max()))
                 start = None
         if len(plates) == 2:

@@ -454,6 +454,7 @@ export function SchematicCanvas() {
               ]}
               selected={selection?.type === "wire" && selection.id === w.id}
               route={w.route}
+              waypoints={w.waypoints}
               onPointerDown={(e, axis) => {
                 e.stopPropagation();
                 select({ type: "wire", id: w.id });

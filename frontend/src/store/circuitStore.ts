@@ -187,7 +187,7 @@ export const useCircuitStore = create<CircuitState>((set, get) => ({
 
   setWireRoute: (id, route) =>
     set((s) => ({
-      wires: s.wires.map((w) => (w.id === id ? { ...w, route } : w)),
+      wires: s.wires.map((w) => (w.id === id ? { ...w, route, waypoints: undefined } : w)),
     })),
 
   rotateComponent: (id, step = 90) =>

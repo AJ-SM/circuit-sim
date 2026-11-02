@@ -85,9 +85,11 @@ export interface PinRef {
   pinId: string;
 }
 
-/** A wire connects exactly two pins. Routing waypoints are derived at
- *  render time (orthogonal auto-routing) unless the user has dragged
- *  custom waypoints, which are stored here in grid units. */
+/** A wire connects exactly two pins. Its path is derived at render time
+ *  (orthogonal auto-routing) unless it has `route` (the user dragged it) or
+ *  `waypoints`: interior points in grid units, e.g. traced from an imported
+ *  drawing so the wire runs as drawn (see waypointPath); an empty list
+ *  means a straight drawn run. */
 export interface Wire {
   id: string;
   from: PinRef;

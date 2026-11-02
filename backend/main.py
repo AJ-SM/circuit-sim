@@ -649,6 +649,33 @@ def job_result(job_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=500, detail="The worker returned an invalid result.")
     return result
 
+class RenderPlacementRequest(BaseModel):
+    # The frontend's PlacementSnapshot (src/utils/placementSnapshot.ts):
+    # parts with pins resolved to grid positions, wires with routed paths.
+    placement: dict[str, Any]
+    # The drawing the circuit was recognised from (data URL or base64),
+    # drawn on the left for comparison. Optional.
+    image: str | None = None
+    # Pixels per grid unit.
+    scale: int = 32
+
+
+@app.post("/render-placement")
+def render_placement_png(req: RenderPlacementRequest):
+    """PNG of the placed circuit (beside the source drawing when given), to
+    check part orientation and wiring against the drawing."""
+    import cv2
+    from fastapi import Response
+    from placement_render import render_placement
+
+    source = _decode_request_image(req) if req.image else None
+    img = render_placement(req.placement, source, max(8, min(req.scale, 96)))
+    ok, png = cv2.imencode(".png", img)
+    if not ok:
+        raise HTTPException(status_code=500, detail="Could not encode the image.")
+    return Response(content=png.tobytes(), media_type="image/png")
+
+
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}

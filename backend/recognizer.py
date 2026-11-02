@@ -58,7 +58,7 @@ LARGE_PART_MAX_AREA = 0.2
 # op-amp and the client didn't choose a model (see detect_boxes), and the
 # confidence a transistor seen by them needs to make that switch.
 ACTIVE_PART_WEIGHTS = os.environ.get("CIRCUIT_ACTIVE_PART_WEIGHTS", "circuit_yolo11_v4_best.pt")
-ACTIVE_PART_MIN_CONF = 0.5
+ACTIVE_PART_MIN_CONF = YOLO_CONF
 
 if str(MODEL_DIR) not in sys.path:
     sys.path.insert(0, str(MODEL_DIR))
@@ -278,7 +278,7 @@ def detect_boxes(image: np.ndarray, rotations: bool = True, model: str | None = 
     no transistor class, miss the grounds around an op-amp, and read
     terminal circles as inductors and box (IEC) resistors as inductors or
     sources. Other drawings keep the default weights, which handle dark
-    canvases better. An op-amp is spotted by its shape, a transistor by one
+    canvases better. An op-amp is spotted by its shape, a transistor by an
     upright pass of the active-part weights."""
     from drawn_topology import binarize
     from opamp_detector import add_opamps, find_opamp_triangles
@@ -320,10 +320,14 @@ def _is_box_resistor(ink: np.ndarray, box) -> bool:
 
 
 def _has_transistor(image: np.ndarray) -> bool:
-    """One upright pass of the active-part weights sees a transistor."""
-    size = _get_model(ACTIVE_PART_WEIGHTS)[1]["imgsz"][0]
-    return any(cls == "Transistor" and conf >= ACTIVE_PART_MIN_CONF
-               for cls, conf, _ in _predict(image, 0, ACTIVE_PART_WEIGHTS, size))
+    """An upright pass of the active-part weights (at each of its input
+    sizes) sees a transistor. On small photos only the larger size does."""
+    for size in _get_model(ACTIVE_PART_WEIGHTS)[1]["imgsz"]:
+        if any(cls == "Transistor" and conf >= ACTIVE_PART_MIN_CONF
+               for cls, conf, _ in _predict(image, 0, ACTIVE_PART_WEIGHTS, size)):
+            return True
+    return False
+
 
 
 def box_to_json(b) -> dict:
@@ -494,6 +498,18 @@ def recognize(image: np.ndarray, title: str = "drawn-circuit", boxes: list | Non
         })
 
     result = netlist.to_json_dict()
+    # The drawn route of each wire (image px, pin to pin), so the editor can
+    # lay wires out as drawn instead of auto-routing them.
+    result["wire_paths"] = [
+        {
+            "net": conn_result.pin_to_net.get(f"{a.component_id}.{an}", "?"),
+            "from": {"ref": a.component_id, "pin": an},
+            "to": {"ref": b.component_id, "pin": bn},
+            "points": [[x, y] for x, y in wp["points"]],
+        }
+        for wp in topology.wire_paths(components)
+        for (a, an), (b, bn) in [(wp["from"], wp["to"])]
+    ]
     # Detections discarded because no wire touches them (usually handwritten
     # labels the detector mistook for parts) — surfaced for debugging.
     result["dropped_detections"] = [

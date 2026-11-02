@@ -157,6 +157,30 @@ export function routedPath(
   return simplify([a, startA, ...mid, startB, b]);
 }
 
+/** Path for a wire with stored waypoints (e.g. traced from a drawing):
+ *  pin a, the waypoints, pin b. Where a pin and its neighbouring waypoint
+ *  aren't on one grid line (the part was moved, or its pin sits off the
+ *  drawn wire), a corner is added so the wire leaves the pin along the
+ *  pin's direction. With no waypoints the wire was drawn as one straight
+ *  run (or a single bend). */
+export function waypointPath(a: Pt, b: Pt, waypoints: Pt[], dirA?: Pt, dirB?: Pt): Pt[] {
+  const corner = (pin: Pt, next: Pt, dir?: Pt): Pt[] => {
+    if (pin.x === next.x || pin.y === next.y) return [];
+    const vertical = dir ? dir.x === 0 : Math.abs(next.y - pin.y) > Math.abs(next.x - pin.x);
+    return [vertical ? { x: pin.x, y: next.y } : { x: next.x, y: pin.y }];
+  };
+  if (waypoints.length === 0) return simplify([a, ...corner(a, b, dirA), b]);
+  const first = waypoints[0];
+  const last = waypoints[waypoints.length - 1];
+  return simplify([
+    a,
+    ...corner(a, first, dirA),
+    ...waypoints,
+    ...corner(b, last, dirB).reverse(),
+    b,
+  ]);
+}
+
 function towards(p: Pt, stub: Pt, route: { axis: "x" | "y"; value: number }): boolean {
   if (route.axis === "y") return stub.y === p.y || Math.sign(stub.y - p.y) === Math.sign(route.value - p.y);
   return stub.x === p.x || Math.sign(stub.x - p.x) === Math.sign(route.value - p.x);
