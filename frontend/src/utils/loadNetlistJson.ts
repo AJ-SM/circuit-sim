@@ -939,8 +939,27 @@ function resolveWireOverlaps(components: ComponentInstance[], wires: Wire[]): vo
 
 // ─── Main export ──────────────────────────────────────────────────────────────
 
+/**
+ * The backend's netlist entries leave out ground symbols (a ground is a node
+ * marker, not a SPICE device); they appear only in component_details. Add
+ * each drawn ground back as a component so it is placed where it was drawn
+ * and wired to its net. Without them the editor picks a hidden reference
+ * (the first source's − terminal), which is the wrong node whenever the
+ * drawn ground is elsewhere, e.g. on an op-amp's + input.
+ */
+function withDrawnGrounds(json: JsonNetlist): JsonNetlist {
+  const listed = new Set(json.components.map((c) => c.ref_des));
+  const grounds: JsonComponent[] = (json.component_details ?? [])
+    .filter((d) => typeToKind(d.type) === "ground" && !listed.has(d.ref_des))
+    .map((d) => {
+      const net = d.pins[0]?.net_id ?? "GND";
+      return { ref_des: d.ref_des, type: d.type, value: "", net_pos: net, net_neg: net, spice_line: "" };
+    });
+  return grounds.length ? { ...json, components: [...json.components, ...grounds] } : json;
+}
+
 export function loadNetlistJson(rawJson: JsonNetlist): LoadResult {
-  const json = bridgeSkippedComponentNets(rawJson);
+  const json = withDrawnGrounds(bridgeSkippedComponentNets(rawJson));
   const skipped: string[] = [];
   const usedRefIds = new Set<string>();
 

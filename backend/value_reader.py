@@ -477,7 +477,9 @@ def _parse(text: str, cls_name: str | None, guess_prefix: bool = True
     the prefix slot is neither a prefix nor the unit ("0.7th" → is that m?).
     `guess_prefix=False` skips the trailing-digit rule, which was calibrated
     on easyocr's confusions and misfires on TrOCR ("45µF" read "4540" → 454µ)."""
-    m = _NUMBER_RE.match(text.replace(" ", ""))
+    # A bracketed label ("(0.5 Vp, 1 kHz)" beside a source) starts with the
+    # bracket, not the number.
+    m = _NUMBER_RE.match(text.replace(" ", "").lstrip("([{"))
     if not m:
         return None, None, False, 0
     digits = m.group(1)

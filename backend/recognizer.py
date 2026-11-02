@@ -54,6 +54,9 @@ IGNORED_CLASSES   = ("Text", "Junction")
 # the image is dropped.
 LARGE_PART_CLASSES = ("Transistor", "Op-Amp")
 LARGE_PART_MAX_AREA = 0.2
+# Weights used instead of the default when the drawing has an op-amp and the
+# client didn't choose a model (see detect_boxes).
+OPAMP_WEIGHTS = os.environ.get("CIRCUIT_OPAMP_WEIGHTS", "circuit_yolo11_v4_best.pt")
 
 if str(MODEL_DIR) not in sys.path:
     sys.path.insert(0, str(MODEL_DIR))
@@ -198,7 +201,7 @@ def _same_symbol(a: np.ndarray, b: np.ndarray) -> bool:
     return inter / small > 0.4
 
 
-def detect_boxes(image: np.ndarray, rotations: bool = True, model: str | None = None) -> list:
+def _yolo_boxes(image: np.ndarray, rotations: bool = True, model: str | None = None) -> list:
     """YOLO component detection only (no wires, no OCR): fast enough to run
     while the user is still drawing.
 
@@ -261,6 +264,24 @@ def detect_boxes(image: np.ndarray, rotations: bool = True, model: str | None = 
             b.poly = poly.round().astype(np.int32)
         boxes.append(b)
     return boxes
+
+
+def detect_boxes(image: np.ndarray, rotations: bool = True, model: str | None = None) -> list:
+    """Component detection (see _yolo_boxes) plus op-amps found from their
+    triangle shape, which most weights have no class for (opamp_detector.py).
+
+    When the drawing has an op-amp and the client left the model to the
+    backend, the op-amp-aware weights (OPAMP_WEIGHTS, trained on schematics
+    with op-amps) detect the parts around it: the default weights miss the
+    grounds there and read terminal circles as inductors. Other drawings
+    keep the default weights, which handle dark canvases better."""
+    from drawn_topology import binarize
+    from opamp_detector import add_opamps, find_opamp_triangles
+
+    ink = binarize(image)
+    if model is None and find_opamp_triangles(ink) and (MODEL_DIR / OPAMP_WEIGHTS).exists():
+        model = OPAMP_WEIGHTS
+    return add_opamps(ink, _yolo_boxes(image, rotations, model))
 
 
 def box_to_json(b) -> dict:
