@@ -719,6 +719,34 @@ function buildWiresFromPinNetIds(
  * circuit's connectivity is exactly the pin net_ids'. Separate ground
  * symbols don't need joining: each one is the reference node already.
  */
+/** Grid units a drawn wire's corner may be off a pin's line and still be
+ *  moved onto it (see alignRunToPin). */
+const PIN_ALIGN_TOLERANCE = 2;
+
+/**
+ * `run` = a wire's waypoints, ordered from `pin` outward. When the first
+ * leg leaves the pin on a slant only slightly off vertical (or horizontal),
+ * move the first waypoint onto the pin's line, together with the waypoints
+ * after it on the same straight run, so every leg stays orthogonal. Edits
+ * `run` in place.
+ */
+function alignRunToPin(pin: GPoint, run: GPoint[]): void {
+  if (run.length === 0) return;
+  const first = run[0];
+  const dx = Math.abs(first.x - pin.x);
+  const dy = Math.abs(first.y - pin.y);
+  if (dx === 0 || dy === 0) return;
+  const axis: "x" | "y" | null =
+    dx <= PIN_ALIGN_TOLERANCE && dx < dy ? "x"
+    : dy <= PIN_ALIGN_TOLERANCE && dy < dx ? "y"
+    : null;
+  if (!axis) return;
+  const old = first[axis];
+  for (let i = 0; i < run.length && run[i][axis] === old; i++) {
+    run[i] = { ...run[i], [axis]: pin[axis] };
+  }
+}
+
 function buildWiresFromPaths(
   paths: JsonWirePath[],
   details: JsonComponentDetail[],
@@ -740,6 +768,7 @@ function buildWiresFromPaths(
     return r;
   };
 
+  const byId = new Map([...refToInstance.values()].map((c) => [c.id, c]));
   const wires: Wire[] = [];
   for (const wp of paths) {
     const from = pinRef(wp.from.ref, wp.from.pin);
@@ -760,7 +789,16 @@ function buildWiresFromPaths(
     const waypoints = grid
       .slice(1, -1)
       .filter((p, i, a) => i === 0 || p.x !== a[i - 1].x || p.y !== a[i - 1].y);
-    wires.push({ id: uuid(), from, to, waypoints });
+    // The wire ends at the part's placed pin, not at the drawn path's end:
+    // a lead drawn a few pixels beside the pin would otherwise leave the
+    // last leg slanted (drawn as a one-unit jog).
+    alignRunToPin(pinWorld(from, byId), waypoints);
+    alignRunToPin(pinWorld(to, byId), waypoints.reverse());
+    waypoints.reverse();
+    const aligned = waypoints.filter(
+      (p, i, a) => i === 0 || p.x !== a[i - 1].x || p.y !== a[i - 1].y
+    );
+    wires.push({ id: uuid(), from, to, waypoints: aligned });
     parent.set(find(key(from)), find(key(to)));
   }
 

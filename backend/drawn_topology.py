@@ -655,12 +655,35 @@ class DrawnTopology:
                 + dist(pts[t[0]], pts[t[2]]),
             )
 
-            def skew(i: int) -> float:
+            # Work in the symbol's own frame (u along its first edge, v along
+            # the second) so slanted boxes are handled like upright ones.
+            o = poly[0]
+            eu, ev = poly[1] - poly[0], poly[3] - poly[0]
+            lu, lv = max(float(np.hypot(*eu)), 1.0), max(float(np.hypot(*ev)), 1.0)
+            eu, ev = eu / lu, ev / lv
+            local = lambda p: ((p[0] - o[0]) * eu[0] + (p[1] - o[1]) * eu[1],
+                               (p[0] - o[0]) * ev[0] + (p[1] - o[1]) * ev[1])
+
+            def base_score(i: int) -> float:
+                """Lower is more base-like. Equal distance to both legs alone
+                (skew) is fooled when a wire running along the box edge drags
+                the base contact off the symbol's middle line, so the shape
+                counts too: the collector and emitter lie along one edge
+                (lined up with a box axis), and the base enters from the
+                opposite side of the box."""
                 a, b = [pts[j] for j in trio if j != i]
                 da, db = dist(pts[i], a), dist(pts[i], b)
-                return abs(da - db) / max(da, db, 1e-9)
+                skew = abs(da - db) / max(da, db, 1e-9)
+                (au, av), (bu, bv), (pu, pv) = local(a), local(b), local(pts[i])
+                du, dv = abs(au - bu), abs(av - bv)
+                align = min(du, dv) / max(du, dv, 1e-9)
+                if dv >= du:   # legs one above the other: base to the side
+                    offset = abs(pu - (au + bu) / 2) / lu
+                else:          # legs side by side: base above / below
+                    offset = abs(pv - (av + bv) / 2) / lv
+                return skew + align + max(0.0, 1.0 - 2.0 * offset)
 
-            base = min(trio, key=skew)
+            base = min(trio, key=base_score)
             legs = [j for j in trio if j != base]
             chosen = [(pts[base], blobs[base]), (pts[legs[0]], blobs[legs[0]]),
                       (pts[legs[1]], blobs[legs[1]])]
