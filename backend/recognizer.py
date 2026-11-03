@@ -265,7 +265,28 @@ def _yolo_boxes(image: np.ndarray, rotations: bool = True, model: str | None = N
         if angle != 0:
             b.poly = poly.round().astype(np.int32)
         boxes.append(b)
-    return boxes
+    return _drop_swallowing(boxes)
+
+
+def _drop_swallowing(boxes: list) -> list:
+    """A symbol never contains another symbol. A box that holds most of a
+    more confident part's box, or a good part of one at least four times
+    smaller than itself, is a false detection over a stretch of the drawing
+    (e.g. a "resistor" boxed over half an AC source and the wires at its
+    corner), and keeping it would cut those wires into separate nets."""
+    def area(b):
+        return max(b.x2 - b.x1, 0) * max(b.y2 - b.y1, 0)
+
+    def inside(inner, outer):
+        w = min(inner.x2, outer.x2) - max(inner.x1, outer.x1)
+        h = min(inner.y2, outer.y2) - max(inner.y1, outer.y1)
+        return max(w, 0) * max(h, 0) / max(area(inner), 1)
+
+    return [b for b in boxes
+            if not any(o is not b and o.conf > b.conf
+                       and (area(o) < 0.5 * area(b) and inside(o, b) >= 0.8
+                            or area(o) < 0.25 * area(b) and inside(o, b) >= 0.25)
+                       for o in boxes)]
 
 
 def detect_boxes(image: np.ndarray, rotations: bool = True, model: str | None = None) -> list:

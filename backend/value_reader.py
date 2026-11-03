@@ -421,14 +421,17 @@ def _merge_passes(first: list[OcrItem], second: list[OcrItem]) -> list[OcrItem]:
 
 def merge_line_items(items: list[OcrItem]) -> list[OcrItem]:
     """Join words that sit side by side on the same text line. A gap up to
-    one text height counts as the same label, so "0.7 mH" stays together."""
+    one text height counts as the same label, so "0.7 mH" stays together.
+    The height is the smaller word's: a tall neighbour (a crossed-out name
+    scribbled next to a value) must not stretch the gap it may bridge."""
     items = sorted(items, key=lambda i: i.x1)
     merged: list[OcrItem] = []
     for it in items:
         for m in merged:
             h = max(m.y2 - m.y1, it.y2 - it.y1, 1)
+            gap = max(min(m.y2 - m.y1, it.y2 - it.y1), 1)
             same_line = abs(m.center[1] - it.center[1]) < 0.5 * h
-            if same_line and 0 <= it.x1 - m.x2 <= h:
+            if same_line and 0 <= it.x1 - m.x2 <= gap:
                 m.text += it.text
                 m.x2, m.y1, m.y2 = it.x2, min(m.y1, it.y1), max(m.y2, it.y2)
                 m.conf = min(m.conf, it.conf)
@@ -478,7 +481,9 @@ def _parse(text: str, cls_name: str | None, guess_prefix: bool = True
     `guess_prefix=False` skips the trailing-digit rule, which was calibrated
     on easyocr's confusions and misfires on TrOCR ("45µF" read "4540" → 454µ)."""
     # A bracketed label ("(0.5 Vp, 1 kHz)" beside a source) starts with the
-    # bracket, not the number.
+    # bracket, not the number; a named one ("Vcc = 9V", "C2 = 10µF") with the
+    # value after the "=".
+    text = text.rsplit("=", 1)[-1]
     m = _NUMBER_RE.match(text.replace(" ", "").lstrip("([{"))
     if not m:
         return None, None, False, 0
@@ -554,6 +559,32 @@ def _prefix_letter(text: str) -> str:
     return m.group(2)[:1] if m else ""
 
 
+# E24 significant figures: drawn resistor values come from this series.
+_E24 = {10, 11, 12, 13, 15, 16, 18, 20, 22, 24, 27, 30, 33, 36, 39, 43, 47, 51,
+        56, 62, 68, 75, 82, 91}
+# A handwritten Ω read as trailing characters of the number ("470Ω" -> "47052").
+_OHM_TAILS = ("52", "S2", "s2", "2")
+
+
+def _is_e24(text: str) -> bool:
+    sig = text.lstrip("0").rstrip("0")
+    return text.isdigit() and int(text) > 0 and (len(sig) <= 1 or (len(sig) == 2 and int(sig) in _E24))
+
+
+def _ohm_tail_reading(text: str) -> str | None:
+    """"47052" is no resistor value, but "470" + an Ω read as "52" is: a
+    reading that isn't an E24 value but becomes one without an Ω look-alike
+    tail gives that stem."""
+    t = text.replace(" ", "")
+    if _is_e24(t) or not t[:1].isdigit():
+        return None
+    for tail in _OHM_TAILS:
+        stem = t[: -len(tail)]
+        if t.endswith(tail) and len(stem) >= 2 and _is_e24(stem):
+            return stem
+    return None
+
+
 def _ohm_glyph_reading(readings: list[str]) -> str | None:
     """Two all-digit readings of a resistor label that share a stem and
     differ only by trailing Ω look-alikes ("3300" / "3302") disagree because
@@ -587,6 +618,10 @@ def parse_item(item: OcrItem, cls_name: str | None) -> tuple[float | None, str |
         stem = _ohm_glyph_reading(texts)
         if stem is not None:
             parsed.insert(0, (stem, _parse(stem, cls_name, guess_prefix=False)))
+        for t in texts:
+            tail_stem = _ohm_tail_reading(t)
+            if tail_stem is not None:
+                parsed.insert(0, (tail_stem, _parse(tail_stem, cls_name, guess_prefix=False)))
     parsed = [(t, p) for t, p in parsed if p[0] is not None]
     if not parsed:
         return None, None, False
@@ -602,7 +637,8 @@ def parse_item(item: OcrItem, cls_name: str | None) -> tuple[float | None, str |
             s += 3
         if "." in text and text.replace(".", "") in texts:
             s += 1
-        if cls_name == "Resistor" and text.isdigit() and text == _ohm_glyph_reading(texts):
+        if cls_name == "Resistor" and text.isdigit() and (
+                text == _ohm_glyph_reading(texts) or any(text == _ohm_tail_reading(t) for t in texts)):
             s += 3
         # A reading that lost two or more digits the other engine saw
         # ("10µF": easyocr "104F", TrOCR "4pyf") is missing part of the number.

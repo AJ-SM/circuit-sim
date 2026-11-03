@@ -895,10 +895,18 @@ class DrawnTopology:
             return [Pin("GND", *on_edge(c.x, c.y))], [c.blob]
 
         if len(contacts) >= 2:
-            # the two terminals are the pair of contacts farthest apart
+            # The two terminals: the pair of contacts farthest apart whose
+            # midpoint is the symbol's centre — leads enter on opposite sides
+            # through it. A stray contact (a label touching a wire above a
+            # capacitor, a curved plate's tip poking out of the box) sits off
+            # that line, so the farthest pair alone can pick it.
+            def score(ab):
+                a, b = ab
+                off = np.hypot((a.x + b.x) / 2 - cx, (a.y + b.y) / 2 - cy)
+                return np.hypot(a.x - b.x, a.y - b.y) - 2.0 * off
             best = max(
                 ((a, b) for i, a in enumerate(contacts) for b in contacts[i + 1:]),
-                key=lambda ab: (ab[0].x - ab[1].x) ** 2 + (ab[0].y - ab[1].y) ** 2,
+                key=score,
             )
             (ax, ay), (bx, by) = on_edge(best[0].x, best[0].y), on_edge(best[1].x, best[1].y)
             blob_a, blob_b = best[0].blob, best[1].blob
@@ -1093,6 +1101,12 @@ class DrawnTopology:
                 start = None
         if len(plates) == 2:
             return max(plates) >= 1.6 * min(plates)
+        if len(plates) == 3:
+            # long-short-long or short-long-short: a capacitor has only two
+            # plates, so three alternating ones are a battery (typically a
+            # detector box that cut off the fourth plate).
+            p0, p1, p2 = plates
+            return min(p0, p2) >= 1.6 * p1 or max(p0, p2) * 1.6 <= p1
         if len(plates) >= 4:
             steps = [p / q for p, q in zip(plates, plates[1:])]
             return all(r >= 1.2 for r in steps[::2]) and all(r <= 1 / 1.2 for r in steps[1::2])                 or all(r <= 1 / 1.2 for r in steps[::2]) and all(r >= 1.2 for r in steps[1::2])

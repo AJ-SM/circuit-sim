@@ -31,14 +31,25 @@ interface DrawCircuitOverlayProps {
   pickImageOnOpen?: boolean;
 }
 
-/** Read an image file and re-encode it with its long side capped at
- *  EXPORT_LONG_SIDE, flattened onto white (transparent PNGs, huge photos). */
+/** Long side (px) an uploaded photo is capped at. Larger than the drawing
+ *  export: the backend resamples for OCR itself (to 1650 px), and a photo
+ *  pre-shrunk to 1600 px loses label detail — on a 2432 px photo the names
+ *  "R1" / "R3" were no longer read, so two resistors swapped names. */
+const UPLOAD_LONG_SIDE = 2600;
+
+/** Read an image file and re-encode it flattened onto white (transparent
+ *  PNGs). Images up to EXPORT_LONG_SIDE go as PNG, unchanged in size; larger
+ *  photos keep their resolution up to UPLOAD_LONG_SIDE and go as JPEG, which
+ *  is smaller than the old 1600 px PNG (lossless would be 6+ MB). JPEG is
+ *  only used for these: on small images its artefacts change what OCR reads. */
 function loadImageFile(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const url = URL.createObjectURL(file);
     const img = new Image();
     img.onload = () => {
-      const k = Math.min(1, EXPORT_LONG_SIDE / Math.max(img.naturalWidth, img.naturalHeight));
+      const longSide = Math.max(img.naturalWidth, img.naturalHeight);
+      const photo = longSide > EXPORT_LONG_SIDE;
+      const k = Math.min(1, UPLOAD_LONG_SIDE / longSide);
       const out = document.createElement("canvas");
       out.width = Math.round(img.naturalWidth * k);
       out.height = Math.round(img.naturalHeight * k);
@@ -47,7 +58,7 @@ function loadImageFile(file: File): Promise<string> {
       ctx.fillRect(0, 0, out.width, out.height);
       ctx.drawImage(img, 0, 0, out.width, out.height);
       URL.revokeObjectURL(url);
-      resolve(out.toDataURL("image/png"));
+      resolve(photo ? out.toDataURL("image/jpeg", 0.95) : out.toDataURL("image/png"));
     };
     img.onerror = () => {
       URL.revokeObjectURL(url);
