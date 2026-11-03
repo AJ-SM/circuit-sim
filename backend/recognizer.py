@@ -57,7 +57,7 @@ LARGE_PART_MAX_AREA = 0.2
 # Weights used instead of the default when the drawing has a transistor or an
 # op-amp and the client didn't choose a model (see detect_boxes), and the
 # confidence a transistor seen by them needs to make that switch.
-ACTIVE_PART_WEIGHTS = os.environ.get("CIRCUIT_ACTIVE_PART_WEIGHTS", "circuit_yolo11_v4_best.pt")
+ACTIVE_PART_WEIGHTS = os.environ.get("CIRCUIT_ACTIVE_PART_WEIGHTS", "circuit_yolo11_v5_best.pt")
 ACTIVE_PART_MIN_CONF = YOLO_CONF
 
 if str(MODEL_DIR) not in sys.path:
