@@ -519,6 +519,107 @@ function applyMultiPinOrientation(
   instance.mirrored = best.mirrored;
 }
 
+/** Grid units a multi-pin part may move off its drawn centre to line its
+ *  leads up with the drawn wires (see alignMultiPinToDrawn). */
+const MULTI_PIN_MAX_SHIFT = 3;
+
+/**
+ * Transistors and op-amps are drawn at a fixed size (2×2 grid units) that is
+ * usually smaller than the drawn symbol, so centred on the drawn box their
+ * leads miss the drawn wires by a unit or two, and each lead's wire then
+ * bends into it. Instead, slide the part so each lead lies on its drawn
+ * pin's line: a lead that leaves vertically (a transistor's C / E) fixes the
+ * part's x, one that leaves horizontally (the base, op-amp pins) its y. The
+ * drawn pins go through the same clustered mapping as the wires' other ends,
+ * so a lead and the part it is wired to land on the same grid line.
+ */
+function alignMultiPinToDrawn(
+  instance: ComponentInstance,
+  detail: JsonComponentDetail,
+  p2g: PixelToGrid
+): void {
+  const def = getDef(instance.kind);
+  if (def.pins.length <= 2) return;
+  const dxs: number[] = [];
+  const dys: number[] = [];
+  for (const pin of def.pins) {
+    const seen = detail.pins.find((p) => normPinName(p.name) === normPinName(pin.name));
+    if (!seen) continue;
+    const target = p2g.toGridClustered(seen.x, seen.y);
+    const t = transformLocal(pin.local, instance.rotation, instance.mirrored);
+    const d = pinDirection(instance, pin);
+    if (d.x === 0 && d.y !== 0) dxs.push(target.x - t.x - instance.x);
+    else if (d.y === 0 && d.x !== 0) dys.push(target.y - t.y - instance.y);
+  }
+  const median = (v: number[]) => {
+    const s = [...v].sort((a, b) => a - b);
+    return s[Math.floor((s.length - 1) / 2)];
+  };
+  const clamp = (v: number) => Math.max(-MULTI_PIN_MAX_SHIFT, Math.min(MULTI_PIN_MAX_SHIFT, v));
+  if (dxs.length) instance.x += clamp(median(dxs));
+  if (dys.length) instance.y += clamp(median(dys));
+}
+
+/**
+ * After every part is placed: two-pin parts sit at their drawn centre,
+ * which can be a unit off the drawn pin position alignMultiPinToDrawn
+ * used. So slide each transistor / op-amp (by up to MULTI_PIN_MAX_SHIFT,
+ * x and y separately) to where the most of its leads line up with a pin
+ * they are wired to — a pin on the same net, out in the direction the lead
+ * leaves and facing back at it, so the wire between them can run straight.
+ * Ties keep the smaller move; with no gain the part stays put.
+ */
+function alignMultiPinToPartners(
+  mapped: MappedComp[],
+  detailMap: Map<string, JsonComponentDetail>
+): void {
+  interface PlacedPin { inst: ComponentInstance; pin: GPoint; dir: GPoint; net: string }
+  const pinsOf = (inst: ComponentInstance, detail: JsonComponentDetail): PlacedPin[] =>
+    getDef(inst.kind).pins.flatMap((def) => {
+      const seen = detail.pins.find((p) => normPinName(p.name) === normPinName(def.name));
+      if (!seen?.net_id) return [];
+      return [{ inst, pin: resolvePinWorld(inst, def), dir: pinDirection(inst, def), net: seen.net_id }];
+    });
+  const all: PlacedPin[] = mapped.flatMap((m) => {
+    const d = detailMap.get(m.jsonComp.ref_des);
+    return d ? pinsOf(m.instance, d) : [];
+  });
+
+  for (const m of mapped) {
+    const inst = m.instance;
+    if (getDef(inst.kind).pins.length <= 2) continue;
+    // the same objects as in `all`, so a part moved here is seen moved by
+    // the parts checked after it
+    const leads = all.filter((p) => p.inst === inst);
+    for (const axis of ["x", "y"] as const) {
+      const along = axis === "x" ? "y" : "x";
+      // leads that leave along the other axis: their `axis` coordinate
+      // must match the partner's for the wire to run straight
+      const straight = leads.filter((l) => l.dir[axis] === 0 && l.dir[along] !== 0);
+      if (!straight.length) continue;
+      // a partner faces the lead: out along its direction, pointing back
+      const partners = straight.map((l) =>
+        all.filter((p) => p.inst !== inst && p.net === l.net &&
+          Math.sign(p.pin[along] - l.pin[along]) === l.dir[along] &&
+          p.dir[along] === -l.dir[along] && p.dir[axis] === 0)
+      );
+      const aligned = (shift: number) =>
+        straight.filter((l, i) => partners[i].some((p) => p.pin[axis] === l.pin[axis] + shift)).length;
+      let best = 0;
+      let bestCount = aligned(0);
+      for (let s = 1; s <= MULTI_PIN_MAX_SHIFT; s++) {
+        for (const shift of [-s, s]) {
+          const n = aligned(shift);
+          if (n > bestCount) { best = shift; bestCount = n; }
+        }
+      }
+      if (best === 0) continue;
+      inst[axis] += best;
+      for (const l of leads) l.pin[axis] += best;
+    }
+  }
+}
+
 // ─── Fallback auto-layout (old format, no component_details) ─────────────────
 
 function autoLayout(count: number): { x: number; y: number }[] {
@@ -730,14 +831,18 @@ const PIN_ALIGN_TOLERANCE = 2;
  * after it on the same straight run, so every leg stays orthogonal. Edits
  * `run` in place.
  */
-function alignRunToPin(pin: GPoint, run: GPoint[]): void {
+function alignRunToPin(pin: GPoint, dir: GPoint, run: GPoint[]): void {
   if (run.length === 0) return;
   const first = run[0];
   const dx = Math.abs(first.x - pin.x);
   const dy = Math.abs(first.y - pin.y);
   if (dx === 0 || dy === 0) return;
+  // A lead that leaves vertically wants the wire straight up / down from
+  // it (and horizontally, sideways); otherwise the nearer axis decides.
   const axis: "x" | "y" | null =
-    dx <= PIN_ALIGN_TOLERANCE && dx < dy ? "x"
+    dir.x === 0 && dir.y !== 0 ? (dx <= PIN_ALIGN_TOLERANCE ? "x" : null)
+    : dir.y === 0 && dir.x !== 0 ? (dy <= PIN_ALIGN_TOLERANCE ? "y" : null)
+    : dx <= PIN_ALIGN_TOLERANCE && dx < dy ? "x"
     : dy <= PIN_ALIGN_TOLERANCE && dy < dx ? "y"
     : null;
   if (!axis) return;
@@ -792,13 +897,21 @@ function buildWiresFromPaths(
     // The wire ends at the part's placed pin, not at the drawn path's end:
     // a lead drawn a few pixels beside the pin would otherwise leave the
     // last leg slanted (drawn as a one-unit jog).
-    alignRunToPin(pinWorld(from, byId), waypoints);
-    alignRunToPin(pinWorld(to, byId), waypoints.reverse());
+    alignRunToPin(pinWorld(from, byId), pinDir(from, byId), waypoints);
+    alignRunToPin(pinWorld(to, byId), pinDir(to, byId), waypoints.reverse());
     waypoints.reverse();
-    const aligned = waypoints.filter(
-      (p, i, a) => i === 0 || p.x !== a[i - 1].x || p.y !== a[i - 1].y
-    );
-    wires.push({ id: uuid(), from, to, waypoints: aligned });
+    // Drop repeated corners and corners in the middle of a straight run.
+    const full = [pinWorld(from, byId), ...waypoints, pinWorld(to, byId)];
+    const kept: GPoint[] = [full[0]];
+    for (let i = 1; i < full.length - 1; i++) {
+      const a = kept[kept.length - 1];
+      const p = full[i];
+      const b = full[i + 1];
+      if (p.x === a.x && p.y === a.y) continue;
+      if ((a.x === p.x && p.x === b.x) || (a.y === p.y && p.y === b.y)) continue;
+      kept.push(p);
+    }
+    wires.push({ id: uuid(), from, to, waypoints: kept.slice(1) });
     parent.set(find(key(from)), find(key(to)));
   }
 
@@ -1179,11 +1292,13 @@ export function loadNetlistJson(rawJson: JsonNetlist): LoadResult {
         m.instance.x = g.x;
         m.instance.y = g.y;
         applyPixelOrientation(m.instance, detail);
+        alignMultiPinToDrawn(m.instance, detail, p2g!);
       } else {
         m.instance.x = snap(6 + idx * 6);
         m.instance.y = snap(2);
       }
     });
+    alignMultiPinToPartners(mapped, detailMap);
   } else {
     const positions = autoLayout(mapped.length);
     mapped.forEach((m, i) => {
