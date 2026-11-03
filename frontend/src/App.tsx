@@ -8,6 +8,7 @@ import { SimulationPanel } from "./components/SimulationPanel";
 import { BranchAnalysisPanel } from "./components/BranchAnalysisPanel";
 import { CircuitJsViewer } from "./components/CircuitJsViewer";
 import { DrawCircuitOverlay } from "./components/DrawCircuitOverlay";
+import { LearnPanel } from "./components/LearnPanel";
 import { useCircuitStore } from "./store/circuitStore";
 
 export type ViewMode = "canvas" | "circuitjs";
@@ -30,6 +31,7 @@ export default function App() {
   const netlistRaw = useCircuitStore((s) => s.netlistRaw);
   const sceneVersion = useCircuitStore((s) => s.sceneVersion);
   const capturingValues = useCircuitStore((s) => s.capturingValues);
+  const learnMode = useCircuitStore((s) => s.learnMode);
   const branchCount = useCircuitStore((s) =>
     s.simStatus === "done" ? s.simResult?.branch_analysis?.length ?? 0 : 0
   );
@@ -75,6 +77,11 @@ export default function App() {
         {drawing && <DrawCircuitOverlay pickImageOnOpen={pickImage} onClose={() => setDrawing(false)} />}
       </div>
       <div className="app-inspector">
+        {learnMode ? (
+          // Learn mode takes over the sidebar so the step card never covers the circuit.
+          <LearnPanel mode={learnMode} />
+        ) : (
+        <>
         <div className="sidebar-head">
         <div className="sidebar-tabs" role="tablist" aria-label="Sidebar">
           <button
@@ -104,6 +111,8 @@ export default function App() {
           </>
         ) : (
           <BranchAnalysisPanel />
+        )}
+        </>
         )}
       </div>
       {capturingValues && (

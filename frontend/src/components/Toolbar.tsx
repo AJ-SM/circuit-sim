@@ -4,6 +4,7 @@ import type { JsonNetlist } from "../utils/loadNetlistJson";
 import type { ViewMode } from "../App";
 import { RunSimulationButton } from "./RunSimulationButton";
 import { InspectToggle } from "./InspectToggle";
+import { LearnMenu } from "./LearnMenu";
 
 interface ToolbarProps {
   viewMode: ViewMode;
@@ -145,6 +146,8 @@ export function Toolbar({ viewMode, onViewModeChange, drawing, onDrawClick, onLo
         <RunSimulationButton />
 
         <InspectToggle />
+
+        <LearnMenu onStart={() => onViewModeChange("canvas")} />
 
         <button
           className="btn"

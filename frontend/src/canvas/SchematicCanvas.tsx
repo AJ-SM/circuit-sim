@@ -10,6 +10,8 @@ import { AnalysisOverlay, buildNodeLabels } from "./AnalysisOverlay";
 import type { ComponentKind, PinRef } from "../types/circuit";
 import type { BranchInfo } from "../api/simulate";
 import { computeWireCurrents } from "../domain/currentFlow";
+import { LearnOverlay } from "./LearnOverlay";
+import { useLearnSteps } from "./useLearnSteps";
 
 const DOT = 1.5;
 
@@ -50,6 +52,7 @@ export function SchematicCanvas() {
   const updateWireCursor = useCircuitStore((s) => s.updateWireCursor);
   const finishWire = useCircuitStore((s) => s.finishWire);
   const cancelWire = useCircuitStore((s) => s.cancelWire);
+  const learnMode = useCircuitStore((s) => s.learnMode);
 
   const [hoveredPin, setHoveredPin] = useState<{ componentId: string; pinId: string } | null>(
     null
@@ -373,6 +376,17 @@ export function SchematicCanvas() {
 
   const analysisActive = simStatus === "done" && !!simResult?.branch_analysis;
 
+  // ── Learn mode: one targeted step at a time, everything else quiet ──────
+  const learning = learnMode !== null;
+  const { steps: learnSteps, index: learnIndex } = useLearnSteps();
+  const step = learning ? learnSteps?.[learnIndex] ?? null : null;
+  /** Parts and wires the current step is about; the rest is dimmed. */
+  const learnFocus = useMemo(() => {
+    if (!step || (step.wires.length === 0 && step.halos.length === 0)) return null;
+    return new Set([...step.wires.map((w) => w.wireId), ...step.halos.map((h) => h.componentId)]);
+  }, [step]);
+  const dimmed = (id: string) => (learning && learnFocus && !learnFocus.has(id) ? 0.28 : 1);
+
   /** Memoised Set of component IDs whose badge is currently visible */
   const badgeVisibleIds = useMemo(() => {
     if (!analysisActive) return null;
@@ -412,7 +426,7 @@ export function SchematicCanvas() {
           <g
             className="raw-wires-layer"
             pointerEvents="none"
-            opacity={wires.length > 0 ? 0.45 : 1}
+            opacity={learning ? 0.2 : wires.length > 0 ? 0.45 : 1}
           >
             {rawWireSegments.map((seg, i) => (
               <line
@@ -438,12 +452,14 @@ export function SchematicCanvas() {
           </g>
         )}
 
+        {step && <LearnOverlay step={step} components={componentsById} layer="under" />}
+
         {/* ── Wires with analysis overlay ─── */}
         {wires.map((w) => {
           const analysis = wireAnalysis.get(w.id);
           return (
+            <g key={w.id} opacity={dimmed(w.id)}>
             <WireView
-              key={w.id}
               points={[
                 componentPinWorld(w.from.componentId, w.from.pinId),
                 componentPinWorld(w.to.componentId, w.to.pinId),
@@ -463,17 +479,18 @@ export function SchematicCanvas() {
               currentAmperes={analysisActive ? analysis?.currentAmperes : undefined}
               currentDirection={analysisActive ? analysis?.currentDirection : undefined}
               avgVoltage={analysisActive ? analysis?.avgVoltage : undefined}
-              showFlow={display.currentDirection}
+              showFlow={display.currentDirection && !learning}
               voltageArrows={
-                analysisActive && display.voltageDirection
+                analysisActive && display.voltageDirection && !learning
                   ? {
                       start: pinPolarity(w.from.componentId, w.from.pinId),
                       end: pinPolarity(w.to.componentId, w.to.pinId),
                     }
                   : undefined
               }
-              labelMode={analysisActive ? display.wireLabels : "off"}
+              labelMode={analysisActive && !learning ? display.wireLabels : "off"}
             />
+            </g>
           );
         })}
 
@@ -487,23 +504,23 @@ export function SchematicCanvas() {
         )}
 
         {components.map((c) => (
+          <g key={c.id} opacity={dimmed(c.id)}>
           <ComponentView
-            key={c.id}
             component={c}
             branchInfo={analysisActive ? branchMap.get(c.id) : undefined}
             showLabels={display.componentLabels}
-            showBranchBadge={analysisActive && (badgeVisibleIds?.has(c.id) ?? false)}
+            showBranchBadge={analysisActive && !learning && (badgeVisibleIds?.has(c.id) ?? false)}
             onToggleBranchBadge={analysisActive ? () => toggleComponentBadge(c.id) : undefined}
             selected={selection?.type === "component" && selection.id === c.id}
             hoveredPin={hoveredPin?.componentId === c.id ? hoveredPin.pinId : null}
             onPointerDownBody={startBodyDrag(c.id)}
-            inspectable={inspectMode && analysisActive && branchMap.has(c.id)}
+            inspectable={inspectMode && !learning && analysisActive && branchMap.has(c.id)}
             onClickBody={(e) => {
               e.stopPropagation();
               // With the toolbar eye on, a click (not a drag) shows / hides the
               // part's voltage and current; otherwise it only selects.
               if (isDraggingComponent.current) return;
-              if (inspectMode && analysisActive && branchMap.has(c.id)) {
+              if (inspectMode && !learning && analysisActive && branchMap.has(c.id)) {
                 toggleComponentBadge(c.id);
               }
             }}
@@ -513,15 +530,18 @@ export function SchematicCanvas() {
             onPinPointerLeave={() => setHoveredPin(null)}
             isPinConnected={(pinId) => isPinConnected(c.id, pinId)}
           />
+          </g>
         ))}
 
         {/* ── Node voltage labels (shown only for toggled components) ─── */}
-        {analysisActive && (
+        {analysisActive && !learning && (
           <AnalysisOverlay
             nodeLabels={nodeLabels}
             visibleComponentIds={badgeVisibleIds}
           />
         )}
+
+        {step && <LearnOverlay step={step} components={componentsById} layer="over" />}
         </g>
       </g>
     </svg>

@@ -1079,3 +1079,235 @@ svg text.canvas-label {
     transform: rotate(360deg);
   }
 }
+
+/* -- Learn mode: toolbar dropdown -- */
+.learn-menu {
+  position: relative;
+}
+
+.learn-menu > .btn.active,
+.learn-menu > .btn.active:hover:not(:disabled) {
+  color: #ffffff;
+  background: var(--ui-accent-bg);
+  border-color: var(--ui-accent);
+}
+
+.learn-menu-list {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 20;
+  min-width: 250px;
+  display: flex;
+  flex-direction: column;
+  padding: 4px;
+  background: var(--ui-island);
+  border: 1px solid var(--ui-btn-border);
+  border-radius: var(--ui-radius);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.55);
+}
+
+.learn-menu-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  padding: 6px 10px;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--ui-radius);
+  color: var(--ui-text);
+  font-family: var(--font-ui);
+  text-align: left;
+  cursor: pointer;
+}
+
+.learn-menu-item:hover {
+  background: var(--ui-hover);
+  border-color: var(--ui-hover-border);
+}
+
+.learn-menu-item.active {
+  background: var(--ui-accent-bg);
+}
+
+.learn-menu-name {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.learn-menu-hint {
+  font-size: 11px;
+  color: var(--ui-text-dim);
+}
+
+.learn-menu-exit {
+  margin-top: 4px;
+  border-top: 1px solid var(--ui-border);
+}
+
+/* -- Learn mode: step card (takes over the right sidebar) -- */
+.learn-panel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--ui-island);
+  font-family: var(--font-ui);
+  color: var(--ui-text);
+}
+
+.learn-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px 6px 12px;
+  background: var(--ui-header);
+  border-bottom: 1px solid var(--ui-border);
+}
+
+.learn-mode {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--ui-accent);
+}
+
+.learn-kicker {
+  font-size: 11px;
+  color: var(--ui-text-dim);
+}
+
+.learn-close {
+  margin-left: auto;
+  width: 22px;
+  height: 22px;
+  background: none;
+  border: 1px solid transparent;
+  color: var(--ui-text-dim);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.learn-close:hover {
+  color: var(--ui-text);
+  border-color: var(--ui-hover-border);
+  background: var(--ui-hover);
+}
+
+.learn-body {
+  flex: 1;
+  min-height: 0;
+  padding: 10px 12px;
+  overflow-y: auto;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.learn-body p {
+  margin: 0 0 6px;
+  color: var(--ui-text-dim);
+}
+
+.learn-title {
+  margin: 0 0 6px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ui-text);
+}
+
+.learn-details {
+  list-style: none;
+  margin: 8px 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.learn-details li {
+  display: grid;
+  grid-template-columns: 8px auto 1fr;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.learn-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  align-self: center;
+}
+
+.learn-detail-label {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.learn-detail-text {
+  color: var(--ui-text);
+}
+
+.learn-equation {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  margin-top: 8px;
+  padding: 8px;
+  background: var(--ui-island-alt);
+  border: 1px solid var(--ui-border-light);
+  font-variant-numeric: tabular-nums;
+}
+
+.learn-term {
+  padding: 1px 6px;
+  border: 1px solid;
+  border-radius: 9px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.learn-op {
+  color: var(--ui-text);
+  font-weight: 700;
+  padding: 0 1px;
+}
+
+.learn-result {
+  margin-top: 6px;
+  font-weight: 600;
+  color: var(--phosphor);
+  font-variant-numeric: tabular-nums;
+}
+
+.learn-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--ui-border);
+}
+
+.learn-progress {
+  flex: 1;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 5px;
+}
+
+.learn-pip {
+  width: 8px;
+  height: 8px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid var(--ui-btn-border);
+  background: var(--ui-btn-bottom);
+  cursor: pointer;
+}
+
+.learn-pip.active {
+  background: var(--ui-accent);
+  border-color: var(--ui-accent);
+}

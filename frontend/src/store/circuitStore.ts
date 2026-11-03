@@ -22,6 +22,7 @@ import {
   type RawWireSegment,
   type RawJunction,
 } from "../utils/loadNetlistJson";
+import type { LearnMode } from "../domain/learnSteps";
 
 export type SelectionRef =
   | { type: "component"; id: string }
@@ -94,6 +95,13 @@ interface CircuitState {
   setInspectMode: (on: boolean) => void;
   display: DisplayOptions;
   setDisplay: (patch: Partial<DisplayOptions>) => void;
+  /** Learn walkthrough on the canvas (KCL / KVL / nodal); null = off. While
+   *  on, the normal flow animations and badges are hidden and only the
+   *  current step's targets are drawn. */
+  learnMode: LearnMode | null;
+  learnStep: number;
+  setLearnMode: (mode: LearnMode | null) => void;
+  setLearnStep: (step: number) => void;
 
   addComponent: (kind: ComponentKind, x: number, y: number) => void;
   moveComponent: (id: string, x: number, y: number) => void;
@@ -159,6 +167,10 @@ export const useCircuitStore = create<CircuitState>((set, get) => ({
   setInspectMode: (on) => set(on ? { inspectMode: true } : { inspectMode: false, toggledBadgeIds: [] }),
   display: DEFAULT_DISPLAY,
   setDisplay: (patch) => set((s) => ({ display: { ...s.display, ...patch } })),
+  learnMode: null,
+  learnStep: 0,
+  setLearnMode: (mode) => set({ learnMode: mode, learnStep: 0 }),
+  setLearnStep: (step) => set({ learnStep: Math.max(0, step) }),
 
   addComponent: (kind, x, y) => {
     const def = getDef(kind);
@@ -279,6 +291,8 @@ export const useCircuitStore = create<CircuitState>((set, get) => ({
       simError: null,
       toggledBadgeIds: [],
       showAllBadges: false,
+      learnMode: null,
+      learnStep: 0,
     })),
 
   loadNetlist: (json) => {
@@ -297,6 +311,8 @@ export const useCircuitStore = create<CircuitState>((set, get) => ({
       simError: null,
       toggledBadgeIds: [],
       showAllBadges: false,
+      learnMode: null,
+      learnStep: 0,
       // A newly placed circuit starts with only the current animation; the
       // other on-wire overlays are switched back off (part labels are kept).
       display: {
