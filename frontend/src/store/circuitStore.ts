@@ -110,6 +110,10 @@ interface CircuitState {
   rotateComponent: (id: string, step?: 45 | 90) => void;
   mirrorComponent: (id: string) => void;
   updateParam: (id: string, key: string, value: number) => void;
+  /** Mark (or unmark) a part's main value as the unknown "x". */
+  setUnknown: (id: string, unknown: boolean) => void;
+  /** Store the solved value of x on the part and re-run the simulation. */
+  applySolvedValue: (id: string, value: number) => Promise<void>;
   select: (ref: SelectionRef) => void;
   deleteSelected: () => void;
 
@@ -218,12 +222,32 @@ export const useCircuitStore = create<CircuitState>((set, get) => ({
       ),
     })),
 
+  // Typing a number into the main value answers the unknown.
   updateParam: (id, key, value) =>
     set((s) => ({
       components: s.components.map((c) =>
-        c.id === id ? { ...c, params: { ...c.params, [key]: value } } : c
+        c.id === id
+          ? {
+              ...c,
+              params: { ...c.params, [key]: value },
+              unknown: !!c.unknown && getDef(c.kind).params[0]?.key !== key,
+            }
+          : c
       ),
     })),
+
+  setUnknown: (id, unknown) =>
+    set((s) => ({
+      components: s.components.map((c) => (c.id === id ? { ...c, unknown } : c)),
+    })),
+
+  applySolvedValue: async (id, value) => {
+    const comp = get().components.find((c) => c.id === id);
+    const key = comp && getDef(comp.kind).params[0]?.key;
+    if (!comp || !key) return;
+    get().updateParam(id, key, value);
+    await get().runSimulate();
+  },
 
   select: (ref) => set({ selection: ref }),
 

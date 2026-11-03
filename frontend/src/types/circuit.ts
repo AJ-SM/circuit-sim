@@ -77,6 +77,10 @@ export interface ComponentInstance {
   rotation: Rotation;
   mirrored: boolean;
   params: Record<string, number>;
+  /** The part's main value (its first param) is the unknown "x" of a
+   *  find-x problem: drawn as "x" and solved for by /solve-unknown. Its
+   *  number in `params` is only a placeholder until then. */
+  unknown?: boolean;
 }
 
 /** A reference to a specific pin of a specific placed component. */

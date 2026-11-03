@@ -83,6 +83,8 @@ export interface JsonComponentDetail {
     cy: number; // centre pixel Y
   };
   conf: number;
+  /** Where the value came from; "unknown" = labelled x / ? in the drawing. */
+  value_source?: "default" | "ocr" | "ocr_inferred" | "unknown";
   pins: JsonPinDetail[];
 }
 
@@ -1307,6 +1309,9 @@ export function loadNetlistJson(rawJson: JsonNetlist): LoadResult {
     });
   }
 
+  for (const m of mapped) {
+    if (detailMap.get(m.jsonComp.ref_des)?.value_source === "unknown") m.instance.unknown = true;
+  }
   const components = mapped.map((m) => m.instance);
 
   let wires: Wire[] = [];

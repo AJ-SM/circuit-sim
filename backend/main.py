@@ -380,7 +380,8 @@ def _signed(z: complex) -> float:
     return mag if ref >= 0 else -mag
 
 
-def _compute_branch_analysis(netlist: Netlist, deck: _Deck, values: dict[str, complex]) -> list[dict]:
+def _compute_branch_analysis(netlist: Netlist, deck: _Deck, values: dict[str, complex],
+                             verbose: bool = True) -> list[dict]:
     """
     Per-component branch analysis using standard EE conventions:
 
@@ -452,6 +453,8 @@ def _compute_branch_analysis(netlist: Netlist, deck: _Deck, values: dict[str, co
             "current_a": round(current, 12),
             "direction": direction,
         })
+    if not verbose:
+        return branches
     print("=== Branch analysis ===")
     for b in branches:
         arrow = "a->b" if b["direction"] == "a_to_b" else ("b->a" if b["direction"] == "b_to_a" else " 0 ")
@@ -459,15 +462,20 @@ def _compute_branch_analysis(netlist: Netlist, deck: _Deck, values: dict[str, co
     print("=======================\n")
     return branches
 
+def _ac_freq_for(netlist: Netlist, analysis: Analysis) -> float | None:
+    """A circuit driven by an AC source has no meaningful DC operating point
+    (the source is 0 V at DC), so solve its sinusoidal steady state at the
+    source frequency instead - unless DC analysis was asked for explicitly."""
+    ac_sources = [c for c in netlist.components if c.type == "vsource_ac"]
+    if ac_sources and analysis.mode != "dc":
+        return float(ac_sources[0].params.get("frequency", 50)) or 50.0
+    return None
+
+
 @app.post("/simulate", response_model=SimulationResult)
 async def simulate(req: SimulateRequest) -> Any:
-    # A circuit driven by an AC source has no meaningful DC operating point
-    # (the source is 0 V at DC), so solve its sinusoidal steady state at the
-    # source frequency instead - unless DC analysis was asked for explicitly.
     ac_sources = [c for c in req.netlist.components if c.type == "vsource_ac"]
-    ac_freq: float | None = None
-    if ac_sources and req.analysis.mode != "dc":
-        ac_freq = float(ac_sources[0].params.get("frequency", 50)) or 50.0
+    ac_freq = _ac_freq_for(req.netlist, req.analysis)
 
     deck = _build_spice_deck(req.netlist, ac_freq)
     print("\n=== SPICE deck ===")
@@ -510,6 +518,111 @@ async def simulate(req: SimulateRequest) -> Any:
             message += "; DC sources are not included"
     return SimulationResult(ok=True, message=message, traces=traces,
                             branch_analysis=[BranchInfo(**b) for b in branch_analysis])
+
+# ── Solve for an unknown ("x") ──────────────────────────────────
+
+class UnknownSpec(BaseModel):
+    component_id: str
+    # Which parameter is unknown; defaults to the part's main value.
+    param: str | None = None
+
+class MeasurementSpec(BaseModel):
+    component_id: str
+    # "voltage" across the part, "current" through it, or "power" in it.
+    quantity: str
+    value: float
+
+class SolveUnknownRequest(BaseModel):
+    netlist: Netlist
+    analysis: Analysis
+    unknown: UnknownSpec
+    measurement: MeasurementSpec
+
+class SolveUnknownResult(BaseModel):
+    ok: bool
+    message: str | None = None
+    component_id: str | None = None
+    ref: str | None = None
+    param: str | None = None
+    unit: str | None = None
+    value: float | None = None
+    solutions: list[float] = []
+    method: str | None = None
+    measured_ref: str | None = None
+    quantity: str | None = None
+    target: float | None = None
+    achieved: float | None = None
+    evaluations: int = 0
+    notes: list[str] = []
+
+_QUANTITY_UNIT = {"voltage": "V", "current": "A", "power": "W"}
+
+
+@app.post("/solve-unknown", response_model=SolveUnknownResult)
+def solve_unknown_route(req: SolveUnknownRequest) -> Any:
+    """Find the unknown part value x that makes the chosen part show the
+    given voltage, current or power. Each trial value is one ngspice run;
+    see unknown_solver.py for how the trials are chosen."""
+    from unknown_solver import PARAM_UNIT, UNKNOWN_PARAM, SolveError, solve_unknown
+
+    comps = req.netlist.components
+    idx = next((i for i, c in enumerate(comps) if c.id == req.unknown.component_id), None)
+    if idx is None:
+        raise HTTPException(status_code=400, detail="The unknown part is not in the circuit.")
+    unknown = comps[idx]
+    param = req.unknown.param or UNKNOWN_PARAM.get(unknown.type)
+    if param is None or param not in PARAM_UNIT:
+        raise HTTPException(status_code=400,
+                            detail=f"{unknown.ref}: x can only be a resistance, capacitance, "
+                                   f"inductance or source voltage.")
+    measured = next((c for c in comps if c.id == req.measurement.component_id), None)
+    if measured is None:
+        raise HTTPException(status_code=400, detail="The measured part is not in the circuit.")
+    quantity = req.measurement.quantity
+    if quantity not in _QUANTITY_UNIT:
+        raise HTTPException(status_code=400, detail="quantity must be voltage, current or power.")
+
+    ac_freq = _ac_freq_for(req.netlist, req.analysis)
+    if unknown.type == "vsource_ac" and ac_freq is None:
+        raise HTTPException(status_code=400,
+                            detail="An AC source's amplitude only matters in AC analysis.")
+
+    def evaluate(x: float) -> float | None:
+        trial = req.netlist.model_copy(deep=True)
+        trial.components[idx].params[param] = x
+        deck = _build_spice_deck(trial, ac_freq)
+        try:
+            raw = _run_ngspice(deck.text)
+        except subprocess.TimeoutExpired:
+            return None
+        values = _parse_results(raw, deck)
+        if values is None:
+            return None
+        branches = _compute_branch_analysis(trial, deck, values, verbose=False)
+        b = next((b for b in branches if b["component_id"] == measured.id), None)
+        if b is None:
+            return None
+        if quantity == "voltage":
+            return b["delta_v"]
+        if quantity == "current":
+            return b["current_a"]
+        return b["delta_v"] * b["current_a"]
+
+    base = dict(component_id=unknown.id, ref=unknown.ref, param=param,
+                unit=PARAM_UNIT[param], measured_ref=measured.ref, quantity=quantity,
+                target=req.measurement.value)
+    try:
+        result = solve_unknown(evaluate, param, req.measurement.value)
+    except FileNotFoundError:
+        raise HTTPException(status_code=500, detail=f"ngspice not found at '{NGSPICE}'.")
+    except SolveError as e:
+        return SolveUnknownResult(ok=False, message=str(e), **base)
+    print(f"[solve-unknown] {unknown.ref}.{param} = {result.value:.6g} "
+          f"({result.method}, {result.evaluations} solves)")
+    return SolveUnknownResult(
+        ok=True, value=result.value, solutions=result.solutions, method=result.method,
+        achieved=result.achieved, evaluations=result.evaluations, notes=result.notes, **base)
+
 
 class GenerateCircuitRequest(BaseModel):
     image: str

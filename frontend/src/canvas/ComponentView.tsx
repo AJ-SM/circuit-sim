@@ -84,8 +84,9 @@ export function ComponentView({
     // Unitless settings (a transistor's β, an op-amp's gain) would read as
     // a bare number next to the part; they're shown in the Inspector only.
     if (p.unit === "none") return null;
+    if (component.unknown) return "x = ?";
     return formatSIValue(component.params[p.key] ?? p.default, p.unit);
-  }, [def, component.params]);
+  }, [def, component.params, component.unknown]);
 
 
   return (
@@ -178,7 +179,8 @@ export function ComponentView({
             </text>
             {valueLabel && (
               <text className="canvas-label" x={val.x} y={val.y} textAnchor={val.anchor}
-                fontSize={11} fontWeight={500} fill="var(--label-value)" fontFamily="var(--font-label)">
+                fontSize={11} fontWeight={component.unknown ? 700 : 500}
+                fill={component.unknown ? "var(--amber)" : "var(--label-value)"} fontFamily="var(--font-label)">
                 {valueLabel}
               </text>
             )}

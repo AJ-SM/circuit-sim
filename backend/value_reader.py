@@ -126,7 +126,7 @@ def ocr_available() -> bool:
 # Ω or µ; they come back as look-alikes (n, 4, u, …) handled in parse_value.
 # R / L / C / D (with V, already there) also let designators like "R5" be read
 # as names instead of being forced into digits ("R5" → "35").
-_OCR_ALLOWLIST = "0123456789.kKmMuUnNpPvVfFhHRLCD"
+_OCR_ALLOWLIST = "0123456789.kKmMuUnNpPvVfFhHRLCDxX?="
 # Long side (px) the image is resampled to for OCR. Chosen empirically on
 # the canvas test drawing; larger was slower and read fewer labels.
 OCR_LONG_SIDE = 1650
@@ -671,7 +671,7 @@ DESIGNATOR_CLASSES = {
 }
 _DESIGNATOR_RE = re.compile(r"^([RCLDVQU])([0-9OoIl|]{1,3})$")
 # Characters a value line may hold when re-read on its own.
-_VALUE_ALLOWLIST = "0123456789.kKmMuUnNpPvVfFhH"
+_VALUE_ALLOWLIST = "0123456789.kKmMuUnNpPvVfFhHxX?"
 
 
 def parse_designator(text: str) -> str | None:
@@ -850,6 +850,53 @@ def assign_values(components, items: list[OcrItem]) -> dict[str, tuple[float, st
         values[comp.component_id] = (value, unit, inferred)
         used.add(i)
     return values
+
+
+# ── Unknown values ("x") ────────────────────────────────────────
+#
+# A "find x" problem labels the unknown part with x instead of a number:
+# "x", "X", "?", "xΩ", "R = x", "Rx", "V = ?". Such a label marks the part
+# as unknown; /solve-unknown later finds its value from a measurement.
+
+_UNKNOWN_RE = re.compile(
+    r"^[RCLVrclv]?[xX?](?:[kKmMuUµμnp]?(?:Ω|Ω|ohms?|F|f|H|h|V|v))?$")
+
+
+def is_unknown_label(text: str) -> bool:
+    """True for a label that names the value as unknown ("x", "R=x", "?V")."""
+    t = text.replace(" ", "")
+    if "=" in t:
+        name, t = t.rsplit("=", 1)
+        if len(name) > 4:
+            return False
+    return bool(_UNKNOWN_RE.match(t))
+
+
+def assign_unknowns(components, items: list[OcrItem]) -> set[str]:
+    """Component ids whose nearest unused label is an unknown marker. Same
+    rules as assign_values: about one symbol-size away, closest pairs first,
+    each label used once. Only parts that have a value (R, C, L, sources)."""
+    pairs = []
+    for comp in components:
+        if comp.cls_name not in CLASS_UNIT:
+            continue
+        box = comp.box
+        max_dist = 1.2 * max(box.x2 - box.x1, box.y2 - box.y1)
+        for i, item in enumerate(items):
+            if not is_unknown_label(item.text) and not any(is_unknown_label(a) for a in item.alts):
+                continue
+            d = _box_distance(box, item)
+            if d <= max_dist:
+                pairs.append((d, comp.component_id, i))
+    pairs.sort(key=lambda p: p[0])
+    out: set[str] = set()
+    used: set[int] = set()
+    for _, cid, i in pairs:
+        if cid in out or i in used:
+            continue
+        out.add(cid)
+        used.add(i)
+    return out
 
 
 # ── Output ──────────────────────────────────────────────────────

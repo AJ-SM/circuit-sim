@@ -424,8 +424,9 @@ def recognize(image: np.ndarray, title: str = "drawn-circuit", boxes: list | Non
     returned so a second, OCR-only call can reuse them."""
     from netlist_generator import NetlistGenerator
     from drawn_topology    import DrawnTopology
-    from value_reader      import (assign_designators, assign_values, format_spice,
-                                   parse_item, read_designators, run_ocr)
+    from value_reader      import (assign_designators, assign_unknowns, assign_values,
+                                   format_spice, is_unknown_label, parse_item,
+                                   read_designators, run_ocr)
 
     # ── 1. Component detection ──────────────────────────────────
     if boxes is None:
@@ -467,8 +468,18 @@ def recognize(image: np.ndarray, title: str = "drawn-circuit", boxes: list | Non
             value, unit, inferred = parse_item(d.value, comp.cls_name)
             if value is not None:
                 read[comp.component_id] = (value, unit, inferred)
-    rest = [c for c in components if c.component_id not in read]
-    read.update(assign_values(rest, [it for it in ocr_items if id(it) not in label_items]))
+    # A value line reading "x" / "?" under a name marks that part unknown.
+    unknown: set[str] = set()
+    for comp in components:
+        d = next((d for d in named.values() if d.name == comp.component_id), None)
+        if (d is not None and d.value is not None and comp.component_id not in read
+                and is_unknown_label(d.value.text)):
+            unknown.add(comp.component_id)
+    free_items = [it for it in ocr_items if id(it) not in label_items]
+    rest = [c for c in components if c.component_id not in read and c.component_id not in unknown]
+    read.update(assign_values(rest, free_items))
+    rest = [c for c in rest if c.component_id not in read]
+    unknown |= assign_unknowns(rest, free_items)
 
     # ── 6. Netlist ──
     netlist = NetlistGenerator(interactive=False).generate(
@@ -497,7 +508,8 @@ def recognize(image: np.ndarray, title: str = "drawn-circuit", boxes: list | Non
                if getattr(comp.box, "poly", None) is not None else {}),
             "conf": round(comp.box.conf, 3),
             "value_source": (
-                "default" if comp.component_id not in read
+                "unknown" if comp.component_id in unknown
+                else "default" if comp.component_id not in read
                 else "ocr_inferred" if read[comp.component_id][2]
                 else "ocr"
             ),

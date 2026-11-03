@@ -9,6 +9,7 @@ import { BranchAnalysisPanel } from "./components/BranchAnalysisPanel";
 import { CircuitJsViewer } from "./components/CircuitJsViewer";
 import { DrawCircuitOverlay } from "./components/DrawCircuitOverlay";
 import { LearnPanel } from "./components/LearnPanel";
+import { SolveUnknownPanel } from "./components/SolveUnknownPanel";
 import { useCircuitStore } from "./store/circuitStore";
 
 export type ViewMode = "canvas" | "circuitjs";
@@ -106,6 +107,7 @@ export default function App() {
         {sidebarTab === "inspector" ? (
           <>
             <PropertiesPanel />
+            <SolveUnknownPanel />
             <DisplayPanel />
             <SimulationPanel />
           </>
