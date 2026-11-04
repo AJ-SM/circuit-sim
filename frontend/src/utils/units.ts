@@ -1,4 +1,4 @@
-import type { ParamUnit } from "../types/circuit";
+import type { Measurement, ParamUnit } from "../types/circuit";
 
 const PREFIXES: { suffix: string; factor: number }[] = [
   { suffix: "p", factor: 1e-12 },
@@ -63,4 +63,30 @@ export function formatSIValue(value: number, unit: ParamUnit): string {
   const scaled = value / tier.factor;
   const rounded = Math.round(scaled * 1000) / 1000;
   return `${rounded}${tier.suffix}${symbol}`;
+}
+
+const MEASUREMENT_SYMBOL: Record<Measurement["quantity"], { name: string; unit: string }> = {
+  voltage: { name: "V", unit: "V" },
+  current: { name: "I", unit: "A" },
+  power: { name: "P", unit: "W" },
+};
+
+/** { current, 0.002 } -> "I = 2mA". */
+export function formatMeasurement(m: Measurement): string {
+  const { name, unit } = MEASUREMENT_SYMBOL[m.quantity];
+  return `${name} = ${formatSIValue(m.value, "none")}${unit}`;
+}
+
+/** "8V" / "I = 2mA" / "0.5 W" -> Measurement; the unit decides the quantity. */
+export function parseMeasurement(text: string): Measurement | null {
+  let t = text.replace(/\s+/g, "");
+  if (t.includes("=")) t = t.slice(t.lastIndexOf("=") + 1);
+  const m = t.match(/^(\d*\.?\d+)([pnuµμmkK]?)([VAW])$/i);
+  if (!m) return null;
+  const prefix: Record<string, number> = { "": 1, p: 1e-12, n: 1e-9, u: 1e-6, µ: 1e-6, μ: 1e-6, m: 1e-3, k: 1e3, K: 1e3 };
+  const factor = prefix[m[2]] ?? prefix[m[2].toLowerCase()];
+  const value = Number(m[1]) * (factor ?? 1);
+  if (!(value > 0)) return null;
+  const unit = m[3].toUpperCase();
+  return { quantity: unit === "A" ? "current" : unit === "W" ? "power" : "voltage", value };
 }

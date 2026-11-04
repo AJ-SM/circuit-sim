@@ -3,7 +3,7 @@ import type { ComponentInstance, PinRef } from "../types/circuit";
 import { getDef } from "../domain/componentDefs";
 import { GRID_SIZE, axisScale, transformLocal } from "../utils/geometry";
 import { SYMBOLS } from "./symbols";
-import { formatSIValue } from "../utils/units";
+import { formatSIValue, formatMeasurement } from "../utils/units";
 import type { BranchInfo } from "../api/simulate";
 
 interface Props {
@@ -84,9 +84,11 @@ export function ComponentView({
     // Unitless settings (a transistor's β, an op-amp's gain) would read as
     // a bare number next to the part; they're shown in the Inspector only.
     if (p.unit === "none") return null;
-    if (component.unknown) return "x = ?";
-    return formatSIValue(component.params[p.key] ?? p.default, p.unit);
-  }, [def, component.params, component.unknown]);
+    const value = component.unknown
+      ? `x = ${component.solvedValue != null ? formatSIValue(component.solvedValue, p.unit) : "?"}`
+      : formatSIValue(component.params[p.key] ?? p.default, p.unit);
+    return component.measured ? `${value}  ·  ${formatMeasurement(component.measured)}` : value;
+  }, [def, component.params, component.unknown, component.solvedValue, component.measured]);
 
 
   return (

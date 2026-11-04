@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { v4 as uuid } from "uuid";
 import type {
+  Measurement,
   ComponentInstance,
   ComponentKind,
   PinRef,
@@ -112,7 +113,9 @@ interface CircuitState {
   updateParam: (id: string, key: string, value: number) => void;
   /** Mark (or unmark) a part's main value as the unknown "x". */
   setUnknown: (id: string, unknown: boolean) => void;
-  /** Store the solved value of x on the part and re-run the simulation. */
+  /** Set or clear a part's known measurement (the given data). */
+  setMeasured: (id: string, measured: Measurement | null) => void;
+  /** Write the solved x into the part (it stays marked as x) and simulate. */
   applySolvedValue: (id: string, value: number) => Promise<void>;
   select: (ref: SelectionRef) => void;
   deleteSelected: () => void;
@@ -231,6 +234,7 @@ export const useCircuitStore = create<CircuitState>((set, get) => ({
               ...c,
               params: { ...c.params, [key]: value },
               unknown: !!c.unknown && getDef(c.kind).params[0]?.key !== key,
+              solvedValue: getDef(c.kind).params[0]?.key === key ? undefined : c.solvedValue,
             }
           : c
       ),
@@ -238,14 +242,27 @@ export const useCircuitStore = create<CircuitState>((set, get) => ({
 
   setUnknown: (id, unknown) =>
     set((s) => ({
-      components: s.components.map((c) => (c.id === id ? { ...c, unknown } : c)),
+      components: s.components.map((c) =>
+        c.id === id ? { ...c, unknown, solvedValue: undefined } : c
+      ),
+    })),
+
+  setMeasured: (id, measured) =>
+    set((s) => ({
+      components: s.components.map((c) =>
+        c.id === id ? { ...c, measured: measured ?? undefined } : c
+      ),
     })),
 
   applySolvedValue: async (id, value) => {
     const comp = get().components.find((c) => c.id === id);
     const key = comp && getDef(comp.kind).params[0]?.key;
     if (!comp || !key) return;
-    get().updateParam(id, key, value);
+    set((s) => ({
+      components: s.components.map((c) =>
+        c.id === id ? { ...c, params: { ...c.params, [key]: value }, solvedValue: value } : c
+      ),
+    }));
     await get().runSimulate();
   },
 

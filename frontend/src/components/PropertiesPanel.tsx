@@ -2,7 +2,8 @@ import { useState } from "react";
 import { useCircuitStore } from "../store/circuitStore";
 import { getDef } from "../domain/componentDefs";
 import { PanelSection } from "./PanelSection";
-import { formatSIValue, parseSIValue } from "../utils/units";
+import { formatMeasurement, formatSIValue, parseMeasurement, parseSIValue } from "../utils/units";
+import type { Measurement } from "../types/circuit";
 import { UNKNOWN_KINDS, isUnknownText } from "../api/solveUnknown";
 
 export function PropertiesPanel() {
@@ -13,6 +14,7 @@ export function PropertiesPanel() {
   const mirrorComponent = useCircuitStore((s) => s.mirrorComponent);
   const deleteSelected = useCircuitStore((s) => s.deleteSelected);
   const setUnknown = useCircuitStore((s) => s.setUnknown);
+  const setMeasured = useCircuitStore((s) => s.setMeasured);
 
   if (selection?.type !== "component") {
     return (
@@ -63,6 +65,12 @@ export function PropertiesPanel() {
           {component.unknown ? "Value is known (clear x)" : "Mark value as unknown (x)"}
         </button>
       )}
+
+      <MeasuredField
+        key={`${component.id}-measured-${component.measured?.quantity}-${component.measured?.value}`}
+        measured={component.measured}
+        onCommit={(m) => setMeasured(component.id, m)}
+      />
 
       <div className="button-row">
         <button className="btn" onClick={() => rotateComponent(component.id)}>
@@ -127,6 +135,46 @@ function ParamField({
           setInvalid(false);
           onCommit(parsed);
           setText(formatSIValue(parsed, unit));
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+        }}
+      />
+    </label>
+  );
+}
+
+/** The known voltage / current / power on this part (the data x is solved
+ *  from). Read from the drawing; editable here to fix a misread. */
+function MeasuredField({
+  measured,
+  onCommit,
+}: {
+  measured?: Measurement;
+  onCommit: (m: Measurement | null) => void;
+}) {
+  const [text, setText] = useState(measured ? formatMeasurement(measured) : "");
+  const [invalid, setInvalid] = useState(false);
+  return (
+    <label className="field">
+      <span className="field-label">Known value</span>
+      <input
+        className={invalid ? "field-input field-input-invalid" : "field-input"}
+        value={text}
+        placeholder="e.g. 8V, I = 2mA, 0.5W"
+        onChange={(e) => setText(e.target.value)}
+        onBlur={() => {
+          if (!text.trim()) {
+            setInvalid(false);
+            onCommit(null);
+            return;
+          }
+          const m = parseMeasurement(text);
+          setInvalid(m === null);
+          if (m) {
+            onCommit(m);
+            setText(formatMeasurement(m));
+          }
         }}
         onKeyDown={(e) => {
           if (e.key === "Enter") (e.target as HTMLInputElement).blur();

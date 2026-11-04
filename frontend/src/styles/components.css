@@ -1317,12 +1317,31 @@ svg text.canvas-label {
   color: var(--amber);
   font-weight: 700;
 }
-.solve-given {
+.solve-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-primary);
+}
+.solve-row {
+  display: grid;
+  grid-template-columns: 64px 1fr;
+  gap: 8px;
+  align-items: baseline;
+}
+.solve-key {
   font-size: 10px;
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--text-dim);
-  margin-top: 2px;
+}
+.solve-given-item {
+  display: block;
+  font-variant-numeric: tabular-nums;
+}
+.solve-missing {
+  color: var(--text-faint);
 }
 .solve-result {
   display: flex;
@@ -1341,13 +1360,6 @@ svg text.canvas-label {
   color: var(--amber);
   font-variant-numeric: tabular-nums;
 }
-.solve-check {
-  font-variant-numeric: tabular-nums;
-}
-.solve-meta {
-  font-size: 11px;
-  color: var(--text-dim);
-}
 .solve-alts {
   display: flex;
   flex-direction: column;
@@ -1359,8 +1371,4 @@ svg text.canvas-label {
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
-}
-.solve-alt-row .btn.active {
-  border-color: var(--amber);
-  color: var(--amber);
 }

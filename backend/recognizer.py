@@ -424,9 +424,10 @@ def recognize(image: np.ndarray, title: str = "drawn-circuit", boxes: list | Non
     returned so a second, OCR-only call can reuse them."""
     from netlist_generator import NetlistGenerator
     from drawn_topology    import DrawnTopology
-    from value_reader      import (assign_designators, assign_unknowns, assign_values,
-                                   format_spice, is_unknown_label, parse_item,
-                                   read_designators, run_ocr)
+    from value_reader      import (assign_designators, assign_measurements,
+                                   assign_unknowns, assign_values, format_spice,
+                                   is_current_or_power_label, is_unknown_label,
+                                   parse_item, read_designators, run_ocr)
 
     # ── 1. Component detection ──────────────────────────────────
     if boxes is None:
@@ -476,10 +477,17 @@ def recognize(image: np.ndarray, title: str = "drawn-circuit", boxes: list | Non
                 and is_unknown_label(d.value.text)):
             unknown.add(comp.component_id)
     free_items = [it for it in ocr_items if id(it) not in label_items]
+    value_items = [it for it in free_items if not is_current_or_power_label(it.text)]
     rest = [c for c in components if c.component_id not in read and c.component_id not in unknown]
-    read.update(assign_values(rest, free_items))
+    used: set[int] = set()
+    read.update(assign_values(rest, value_items, used))
     rest = [c for c in rest if c.component_id not in read]
-    unknown |= assign_unknowns(rest, free_items)
+    unknown |= assign_unknowns(rest, free_items, components)
+    # Labels left over that carry a unit (V / A / W) are the given
+    # measurements of a find-x problem: "8V" by R2 = voltage across R2.
+    taken = {id(value_items[i]) for i in used}
+    measured = assign_measurements(
+        components, [it for it in free_items if id(it) not in taken])
 
     # ── 6. Netlist ──
     netlist = NetlistGenerator(interactive=False).generate(
@@ -513,6 +521,9 @@ def recognize(image: np.ndarray, title: str = "drawn-circuit", boxes: list | Non
                 else "ocr_inferred" if read[comp.component_id][2]
                 else "ocr"
             ),
+            **({"measured": {"quantity": measured[comp.component_id][0],
+                             "value": measured[comp.component_id][1]}}
+               if comp.component_id in measured else {}),
             **({"polarity": topology.polarity_method[comp.component_id]}
                if comp.component_id in topology.polarity_method else {}),
             # transistors: "npn" / "pnp", and how the emitter was picked

@@ -126,7 +126,7 @@ def ocr_available() -> bool:
 # Ω or µ; they come back as look-alikes (n, 4, u, …) handled in parse_value.
 # R / L / C / D (with V, already there) also let designators like "R5" be read
 # as names instead of being forced into digits ("R5" → "35").
-_OCR_ALLOWLIST = "0123456789.kKmMuUnNpPvVfFhHRLCDxX?="
+_OCR_ALLOWLIST = "0123456789.kKmMuUnNpPvVfFhHRLCDxX?=AWI"
 # Long side (px) the image is resampled to for OCR. Chosen empirically on
 # the canvas test drawing; larger was slower and read fewer labels.
 OCR_LONG_SIDE = 1650
@@ -671,7 +671,7 @@ DESIGNATOR_CLASSES = {
 }
 _DESIGNATOR_RE = re.compile(r"^([RCLDVQU])([0-9OoIl|]{1,3})$")
 # Characters a value line may hold when re-read on its own.
-_VALUE_ALLOWLIST = "0123456789.kKmMuUnNpPvVfFhHxX?"
+_VALUE_ALLOWLIST = "0123456789.kKmMuUnNpPvVfFhHxX?AW"
 
 
 def parse_designator(text: str) -> str | None:
@@ -829,7 +829,8 @@ def _best_item(box, cls_name, items, max_dist=None, exclude=None) -> int | None:
     return best
 
 
-def assign_values(components, items: list[OcrItem]) -> dict[str, tuple[float, str, bool]]:
+def assign_values(components, items: list[OcrItem],
+                  used_out: set[int] | None = None) -> dict[str, tuple[float, str, bool]]:
     """Match labels to components ({ref_des: (value, unit)}). Each label is
     used at most once, closest pairs first, so a label between two parts
     goes to the nearer one and the other part looks further out.
@@ -849,6 +850,8 @@ def assign_values(components, items: list[OcrItem]) -> dict[str, tuple[float, st
         value, unit, inferred = parse_item(items[i], comp.cls_name)
         values[comp.component_id] = (value, unit, inferred)
         used.add(i)
+    if used_out is not None:
+        used_out |= used
     return values
 
 
@@ -862,6 +865,13 @@ _UNKNOWN_RE = re.compile(
     r"^[RCLVrclv]?[xX?](?:[kKmMuUµμnp]?(?:Ω|Ω|ohms?|F|f|H|h|V|v))?$")
 
 
+def _inside_symbol(item: OcrItem, components) -> bool:
+    """The text box's centre lies inside a detected part: it is ink of the
+    symbol (a transistor's arrow and leads read as "X"), not a label."""
+    cx, cy = item.center
+    return any(c.box.x1 <= cx <= c.box.x2 and c.box.y1 <= cy <= c.box.y2 for c in components)
+
+
 def is_unknown_label(text: str) -> bool:
     """True for a label that names the value as unknown ("x", "R=x", "?V")."""
     t = text.replace(" ", "")
@@ -872,7 +882,7 @@ def is_unknown_label(text: str) -> bool:
     return bool(_UNKNOWN_RE.match(t))
 
 
-def assign_unknowns(components, items: list[OcrItem]) -> set[str]:
+def assign_unknowns(components, items: list[OcrItem], all_components=None) -> set[str]:
     """Component ids whose nearest unused label is an unknown marker. Same
     rules as assign_values: about one symbol-size away, closest pairs first,
     each label used once. Only parts that have a value (R, C, L, sources)."""
@@ -885,6 +895,8 @@ def assign_unknowns(components, items: list[OcrItem]) -> set[str]:
         for i, item in enumerate(items):
             if not is_unknown_label(item.text) and not any(is_unknown_label(a) for a in item.alts):
                 continue
+            if _inside_symbol(item, all_components or components):
+                continue
             d = _box_distance(box, item)
             if d <= max_dist:
                 pairs.append((d, comp.component_id, i))
@@ -895,6 +907,72 @@ def assign_unknowns(components, items: list[OcrItem]) -> set[str]:
         if cid in out or i in used:
             continue
         out.add(cid)
+        used.add(i)
+    return out
+
+
+# ── Known measurements ("8V", "I = 2mA", "0.5W") ────────────────
+#
+# A find-x problem also gives what was measured: a voltage written by a
+# resistor is the voltage across it (a resistor's own value is in ohms), a
+# current is the current through the part, a power the power in it. These
+# need the unit written explicitly; a bare number stays a part value.
+
+_MEAS_RE = re.compile(
+    r"^([0-9OoDlI|]*[.,·]?[0-9OoDlI|]+)([kKmMuUµμnp]?)(A|W|V|a|w|v)$")
+_MEAS_PREFIX = {"": 1.0, "k": 1e3, "K": 1e3, "m": 1e-3, "M": 1e-3, "u": 1e-6,
+                "U": 1e-6, "µ": 1e-6, "μ": 1e-6, "n": 1e-9, "p": 1e-12}
+_MEAS_QUANTITY = {"A": "current", "W": "power", "V": "voltage"}
+
+
+def parse_measurement(text: str) -> tuple[str, float] | None:
+    """("current", 0.002) for "I = 2mA" / "2mA"; ("voltage", 8.0) for "8V".
+    None unless the label ends in an explicit V, A or W."""
+    t = text.replace(" ", "")
+    if "=" in t:
+        name, t = t.rsplit("=", 1)
+        if len(name) > 4:
+            return None
+    m = _MEAS_RE.match(t)
+    if not m:
+        return None
+    try:
+        number = float(m.group(1).translate(_DIGIT_FIXES))
+    except ValueError:
+        return None
+    unit = m.group(3).upper()
+    # "M" is milli here: mega-amps / megavolts are never on a drawing.
+    value = number * _MEAS_PREFIX[m.group(2)]
+    return (_MEAS_QUANTITY[unit], value) if value > 0 else None
+
+
+def is_current_or_power_label(text: str) -> bool:
+    """A label in amps or watts is never a part's value; keep it away from
+    the value matching (a source would otherwise read "2mA" as 2 mV)."""
+    m = parse_measurement(text)
+    return m is not None and m[0] != "voltage"
+
+
+def assign_measurements(components, items: list[OcrItem]) -> dict[str, tuple[str, float]]:
+    """{component_id: (quantity, value)} for the measurement labels left
+    after part values were taken: closest pairs first, one per part."""
+    pairs = []
+    for comp in components:
+        box = comp.box
+        max_dist = 1.2 * max(box.x2 - box.x1, box.y2 - box.y1)
+        for i, item in enumerate(items):
+            if parse_measurement(item.text) is None or _inside_symbol(item, components):
+                continue
+            d = _box_distance(box, item)
+            if d <= max_dist:
+                pairs.append((d, comp.component_id, i))
+    pairs.sort(key=lambda p: p[0])
+    out: dict[str, tuple[str, float]] = {}
+    used: set[int] = set()
+    for _, cid, i in pairs:
+        if cid in out or i in used:
+            continue
+        out[cid] = parse_measurement(items[i].text)
         used.add(i)
     return out
 

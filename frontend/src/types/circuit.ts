@@ -81,6 +81,16 @@ export interface ComponentInstance {
    *  find-x problem: drawn as "x" and solved for by /solve-unknown. Its
    *  number in `params` is only a placeholder until then. */
   unknown?: boolean;
+  /** Value found for x by "Solve for x" (also written into `params`). */
+  solvedValue?: number;
+  /** A known measurement on this part, given by the problem (read from the
+   *  drawing, e.g. "8V" or "I = 2mA" next to it): the data x is solved from. */
+  measured?: Measurement;
+}
+
+export interface Measurement {
+  quantity: "voltage" | "current" | "power";
+  value: number;
 }
 
 /** A reference to a specific pin of a specific placed component. */

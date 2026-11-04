@@ -85,6 +85,8 @@ export interface JsonComponentDetail {
   conf: number;
   /** Where the value came from; "unknown" = labelled x / ? in the drawing. */
   value_source?: "default" | "ocr" | "ocr_inferred" | "unknown";
+  /** A known voltage / current / power written next to the part. */
+  measured?: { quantity: "voltage" | "current" | "power"; value: number };
   pins: JsonPinDetail[];
 }
 
@@ -1310,7 +1312,9 @@ export function loadNetlistJson(rawJson: JsonNetlist): LoadResult {
   }
 
   for (const m of mapped) {
-    if (detailMap.get(m.jsonComp.ref_des)?.value_source === "unknown") m.instance.unknown = true;
+    const detail = detailMap.get(m.jsonComp.ref_des);
+    if (detail?.value_source === "unknown") m.instance.unknown = true;
+    if (detail?.measured) m.instance.measured = detail.measured;
   }
   const components = mapped.map((m) => m.instance);
 
